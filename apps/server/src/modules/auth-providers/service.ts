@@ -45,7 +45,14 @@ export class AuthProvidersService {
   }
 
   private buildBaseUrl(requestContext?: RequestContextService): string {
-    return requestContext ? `${requestContext.protocol}://${requestContext.host}` : DEFAULT_BASE_URL;
+    if (!requestContext) return DEFAULT_BASE_URL;
+    // Defense in depth against multi-valued X-Forwarded-* leaking through:
+    // controllers already strip these to a single token, but if a caller
+    // somewhere forgets, we don't want `"https, https://host"` to end up
+    // as our IdP redirect URI.
+    const proto = requestContext.protocol?.split(",")[0]?.trim() || "http";
+    const host = requestContext.host?.split(",")[0]?.trim() || "";
+    return `${proto}://${host}`;
   }
 
   private generateState(): string {

@@ -48,9 +48,23 @@ export class AuthProvidersController {
   }
 
   private buildRequestContext(request: FastifyRequest): RequestContext {
+    // Reverse-proxy chains can produce multi-valued headers like
+    //   X-Forwarded-Proto: https, https
+    //   X-Forwarded-Host: a.example, b.example
+    // The previous implementation passed the raw header straight through,
+    // which produced URLs like "https, https://host/..." — breaking OIDC
+    // callback resolution. Use Fastify's request.protocol / request.hostname
+    // (with trustProxy: true these already pick the left-most token), and
+    // fall back to a defensive comma-split for any direct header read.
+    const firstToken = (value: string | undefined) => (value ?? "").split(",")[0]?.trim() ?? "";
+    const protocol = request.protocol || firstToken(request.headers["x-forwarded-proto"] as string | undefined);
+    const host =
+      request.hostname ||
+      firstToken(request.headers["x-forwarded-host"] as string | undefined) ||
+      firstToken(request.headers.host as string | undefined);
     return {
-      protocol: (request.headers["x-forwarded-proto"] as string) || request.protocol,
-      host: (request.headers["x-forwarded-host"] as string) || (request.headers.host as string),
+      protocol,
+      host,
       headers: request.headers,
     };
   }

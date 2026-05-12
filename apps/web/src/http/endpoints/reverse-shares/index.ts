@@ -34,7 +34,7 @@ export const createReverseShare = <TData = CreateReverseShareResult>(
   createReverseShareBody: CreateReverseShareBody,
   options?: AxiosRequestConfig
 ): Promise<TData> => {
-  return apiInstance.post(`/api/reverse-shares/create`, createReverseShareBody, options);
+  return apiInstance.post(`/api/reverse-shares`, createReverseShareBody, options);
 };
 
 /**
@@ -44,7 +44,7 @@ export const createReverseShare = <TData = CreateReverseShareResult>(
 export const listUserReverseShares = <TData = ListUserReverseSharesResult>(
   options?: AxiosRequestConfig
 ): Promise<TData> => {
-  return apiInstance.get(`/api/reverse-shares/list`, options);
+  return apiInstance.get(`/api/reverse-shares`, options);
 };
 
 /**
@@ -55,7 +55,7 @@ export const getReverseShare = <TData = GetReverseShareResult>(
   id: string,
   options?: AxiosRequestConfig
 ): Promise<TData> => {
-  return apiInstance.get(`/api/reverse-shares/details/${id}`, options);
+  return apiInstance.get(`/api/reverse-shares/${id}`, options);
 };
 
 /**
@@ -66,7 +66,7 @@ export const updateReverseShare = <TData = UpdateReverseShareResult>(
   updateReverseShareBody: UpdateReverseShareBody,
   options?: AxiosRequestConfig
 ): Promise<TData> => {
-  return apiInstance.put(`/api/reverse-shares/update`, updateReverseShareBody, options);
+  return apiInstance.put(`/api/reverse-shares`, updateReverseShareBody, options);
 };
 
 /**
@@ -78,7 +78,7 @@ export const updateReverseSharePassword = <TData = UpdateReverseSharePasswordRes
   updateReverseSharePasswordBody: UpdateReverseSharePasswordBody,
   options?: AxiosRequestConfig
 ): Promise<TData> => {
-  return apiInstance.put(`/api/reverse-shares/password/${id}`, updateReverseSharePasswordBody, options);
+  return apiInstance.put(`/api/reverse-shares/${id}/password`, updateReverseSharePasswordBody, options);
 };
 
 /**
@@ -89,7 +89,7 @@ export const deleteReverseShare = <TData = DeleteReverseShareResult>(
   id: string,
   options?: AxiosRequestConfig
 ): Promise<TData> => {
-  return apiInstance.delete(`/api/reverse-shares/delete/${id}`, options);
+  return apiInstance.delete(`/api/reverse-shares/${id}`, options);
 };
 
 /**
@@ -101,7 +101,7 @@ export const getReverseShareForUpload = <TData = GetReverseShareForUploadResult>
   params?: GetReverseShareForUploadParams,
   options?: AxiosRequestConfig
 ): Promise<TData> => {
-  return apiInstance.get(`/api/reverse-shares/upload/${id}`, {
+  return apiInstance.get(`/api/reverse-shares/${id}/upload`, {
     ...options,
     params: { ...params, ...options?.params },
   });
@@ -132,7 +132,7 @@ export const getPresignedUrlForUpload = <TData = GetPresignedUrlResult>(
   params?: RegisterFileUploadParams,
   options?: AxiosRequestConfig
 ): Promise<TData> => {
-  return apiInstance.post(`/api/reverse-shares/presigned-url/${id}`, getPresignedUrlBody, {
+  return apiInstance.post(`/api/reverse-shares/${id}/presigned-url`, getPresignedUrlBody, {
     ...options,
     params: { ...params, ...options?.params },
   });
@@ -164,7 +164,7 @@ export const registerFileUpload = <TData = RegisterFileUploadResult>(
   params?: RegisterFileUploadParams,
   options?: AxiosRequestConfig
 ): Promise<TData> => {
-  return apiInstance.post(`/api/reverse-shares/register-upload/${id}`, registerFileUploadBody, {
+  return apiInstance.post(`/api/reverse-shares/${id}/register-file`, registerFileUploadBody, {
     ...options,
     params: { ...params, ...options?.params },
   });
@@ -195,7 +195,7 @@ export const checkReverseSharePassword = <TData = CheckReverseSharePasswordResul
   checkReverseSharePasswordBody: CheckReverseSharePasswordBody,
   options?: AxiosRequestConfig
 ): Promise<TData> => {
-  return apiInstance.post(`/api/reverse-shares/check-password/${id}`, checkReverseSharePasswordBody, options);
+  return apiInstance.post(`/api/reverse-shares/${id}/check-password`, checkReverseSharePasswordBody, options);
 };
 
 /**
@@ -206,7 +206,7 @@ export const downloadReverseShareFile = <TData = GetPresignedUrlResult>(
   fileId: string,
   options?: AxiosRequestConfig
 ): Promise<TData> => {
-  return apiInstance.get(`/api/reverse-shares/files/download/${fileId}`, options);
+  return apiInstance.get(`/api/reverse-shares/files/${fileId}/download`, options);
 };
 
 /**
@@ -237,7 +237,7 @@ export const activateReverseShare = <TData = ActivateReverseShareResult>(
   id: string,
   options?: AxiosRequestConfig
 ): Promise<TData> => {
-  return apiInstance.patch(`/api/reverse-shares/activate/${id}`, undefined, options);
+  return apiInstance.patch(`/api/reverse-shares/${id}/activate`, undefined, options);
 };
 
 /**
@@ -248,7 +248,7 @@ export const deactivateReverseShare = <TData = DeactivateReverseShareResult>(
   id: string,
   options?: AxiosRequestConfig
 ): Promise<TData> => {
-  return apiInstance.patch(`/api/reverse-shares/deactivate/${id}`, undefined, options);
+  return apiInstance.patch(`/api/reverse-shares/${id}/deactivate`, undefined, options);
 };
 
 /**

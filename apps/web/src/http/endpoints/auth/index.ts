@@ -83,14 +83,14 @@ export const updateProvider = <TData = UpdateProviderResult>(
   updates: Partial<AuthProvider>,
   options?: AxiosRequestConfig
 ): Promise<TData> => {
-  return apiInstance.put(`/api/auth/providers/manage/${id}`, updates, options);
+  return apiInstance.put(`/api/auth/providers/${id}`, updates, options);
 };
 
 export const deleteProvider = <TData = DeleteProviderResult>(
   id: string,
   options?: AxiosRequestConfig
 ): Promise<TData> => {
-  return apiInstance.delete(`/api/auth/providers/manage/${id}`, options);
+  return apiInstance.delete(`/api/auth/providers/${id}`, options);
 };
 
 export const updateProvidersOrder = <TData = UpdateProvidersOrderResult>(

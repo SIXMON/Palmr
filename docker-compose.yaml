@@ -58,7 +58,7 @@ services:
     volumes:
       - ./traefik/dynamic.yaml:/etc/traefik/dynamic.yaml:ro
     depends_on:
-      palmr-server:
+      palmr-web:
         condition: service_healthy
     networks:
       - palmr
@@ -128,7 +128,8 @@ services:
   # API_BASE_URL=http://palmr-server:3333 — no need to publish the port unless
   # you want direct API access from the host.
   # ---------------------------------------------------------------------------
-  palmr-server:
+  palmr-server-js:
+    profiles: ["js-backend"]
     build:
       # Context scoped to apps/server/ — the build doesn't need anything from
       # the rest of the monorepo. Seed support files (configs.json,
@@ -210,7 +211,7 @@ services:
       context: ./apps/server-go
       dockerfile: Dockerfile
     image: ghcr.io/sixmon/palmr-server-go:dev
-    container_name: palmr-server-go
+    container_name: palmr-server
     restart: unless-stopped
     depends_on:
       minio:
@@ -269,9 +270,6 @@ services:
     image: ghcr.io/sixmon/palmr-web:latest
     container_name: palmr-web
     restart: unless-stopped
-    depends_on:
-      palmr-server:
-        condition: service_healthy
     environment:
       API_BASE_URL: http://palmr-server:3333
       NEXT_PUBLIC_DEFAULT_LANGUAGE: ${DEFAULT_LANGUAGE:-en-US}

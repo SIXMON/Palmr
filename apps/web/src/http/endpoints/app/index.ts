@@ -43,7 +43,7 @@ export const uploadLogo = <TData = UploadLogoResult>(
     formData.append("file", uploadLogoBody.file as Blob);
   }
 
-  return apiInstance.post(`/api/app/upload-logo`, formData, {
+  return apiInstance.post(`/api/app/logo`, formData, {
     ...options,
     headers: {
       ...options?.headers,
@@ -57,7 +57,7 @@ export const uploadLogo = <TData = UploadLogoResult>(
  * @summary Remove app logo
  */
 export const removeLogo = <TData = RemoveLogoResult>(options?: AxiosRequestConfig): Promise<TData> => {
-  return apiInstance.delete(`/api/app/remove-logo`, options);
+  return apiInstance.delete(`/api/app/logo`, options);
 };
 
 /**
@@ -65,7 +65,7 @@ export const removeLogo = <TData = RemoveLogoResult>(options?: AxiosRequestConfi
  * @summary Check API Health
  */
 export const checkHealth = <TData = CheckHealthResult>(options?: AxiosRequestConfig): Promise<TData> => {
-  return apiInstance.get(`/api/app/health`, options);
+  return apiInstance.get(`/api/health`, options);
 };
 
 /**
@@ -73,7 +73,7 @@ export const checkHealth = <TData = CheckHealthResult>(options?: AxiosRequestCon
  * @summary Get server disk space information
  */
 export const getDiskSpace = <TData = GetDiskSpaceResult>(options?: AxiosRequestConfig): Promise<TData> => {
-  return apiInstance.get(`/api/app/disk-space`, options);
+  return apiInstance.get(`/api/storage/disk-space`, options);
 };
 
 /**
@@ -84,7 +84,7 @@ export const checkUploadAllowed = <TData = CheckUploadAllowedResult>(
   params: CheckUploadAllowedParams,
   options?: AxiosRequestConfig
 ): Promise<TData> => {
-  return apiInstance.get(`/api/app/check-upload`, {
+  return apiInstance.get(`/api/storage/check-upload`, {
     ...options,
     params: { ...params, ...options?.params },
   });

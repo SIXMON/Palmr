@@ -3,10 +3,17 @@
 # =============================================================================
 #
 # Services
-#   minio       — S3-compatible object store (image: minio/minio)
-#   minio-init  — one-shot job that creates the bucket on first boot
+#   traefik      — HTTP router that fans out /api → backend, / → frontend
+#   minio        — S3-compatible object store (image: minio/minio)
+#   minio-init   — one-shot job that creates the bucket on first boot
 #   palmr-server — Fastify backend (Dockerfile: apps/server/Dockerfile)
 #   palmr-web    — Next.js frontend  (Dockerfile: apps/web/Dockerfile)
+#
+# Public traffic shape
+#   The web client makes API calls against /api/... on the same origin as the
+#   page. Traefik strips the /api prefix and forwards them to palmr-server.
+#   Everything else falls through to palmr-web. The frontend no longer needs
+#   per-route Next.js proxy handlers — the router does it once for all of them.
 #
 # Most settings come from a `.env` file at the repo root. See `.env.example`
 # for the full list of variables you need to set before first start.
@@ -21,6 +28,41 @@
 # usable — just check out an older docker-compose.yaml if you want it back.
 
 services:
+  # ---------------------------------------------------------------------------
+  # Reverse proxy — only public-facing service. Configured entirely through
+  # the bundled `traefik.yaml` static config (no Docker socket access, no
+  # provider labels on the other containers) — the routing is fixed and
+  # short enough that the file provider is the simplest option.
+  #
+  # If you already terminate TLS at an upstream proxy (Cloudflare, nginx,
+  # another Traefik), point that upstream at this container's HTTP entrypoint
+  # — no TLS config is needed here.
+  # ---------------------------------------------------------------------------
+  traefik:
+    image: traefik:v3.1
+    container_name: palmr-traefik
+    restart: unless-stopped
+    command:
+      - "--providers.file.filename=/etc/traefik/dynamic.yaml"
+      - "--providers.file.watch=true"
+      - "--entrypoints.web.address=:80"
+      # Streaming uploads must not be cut off by Traefik — the backend already
+      # enforces a body limit via MAX_BODY_SIZE_MB.
+      - "--entrypoints.web.transport.respondingTimeouts.readTimeout=0"
+      - "--entrypoints.web.transport.respondingTimeouts.writeTimeout=0"
+      - "--entrypoints.web.transport.respondingTimeouts.idleTimeout=0"
+      - "--accesslog=true"
+      - "--log.level=INFO"
+    ports:
+      - "${WEB_PORT:-5487}:80"
+    volumes:
+      - ./traefik/dynamic.yaml:/etc/traefik/dynamic.yaml:ro
+    depends_on:
+      palmr-server:
+        condition: service_healthy
+    networks:
+      - palmr
+
   # ---------------------------------------------------------------------------
   # Object storage (S3-compatible) — used by palmr-server via ENABLE_S3=true.
   # The web client also reaches MinIO directly for presigned uploads/downloads
@@ -94,12 +136,10 @@ services:
       # travel with this context.
       context: ./apps/server
       dockerfile: Dockerfile
-      platforms:
-        - linux/amd64
       args:
         PALMR_UID: ${PALMR_UID:-1001}
         PALMR_GID: ${PALMR_GID:-1001}
-    image: sixmonk8s/palmr-server:1.0.0
+    image: ghcr.io/sixmon/palmr-server:latest
     container_name: palmr-server
     restart: unless-stopped
     depends_on:
@@ -135,29 +175,38 @@ services:
       PALMR_GID: ${PALMR_GID:-1001}
     volumes:
       - server-data:/data
-    ports:
-      # Expose only if you need direct API access from the host. The web
-      # frontend reaches the backend on the docker network and doesn't need
-      # this port to be published.
-      - "${SERVER_PORT:-3333}:3333"
+    # The host no longer needs to publish 3333 — Traefik routes /api/* to it
+    # on the docker network. Uncomment the next block if you want direct
+    # access from outside for debugging.
+    # ports:
+    #   - "${SERVER_PORT:-3333}:3333"
+    healthcheck:
+      # /health is on the API root (no `/api` prefix on the backend itself).
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:3333/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
     networks:
       - palmr
 
   # ---------------------------------------------------------------------------
-  # Frontend (Next.js standalone). Reverse-proxies API calls to the backend
-  # through API_BASE_URL.
+  # Frontend (Next.js standalone). Static UI + SSR for the share/embed
+  # routes. API calls from the browser go to `/api/*` on the same origin and
+  # are routed by Traefik directly to palmr-server (used to be proxied
+  # through Next.js route handlers — those are gone now). The SSR layouts
+  # still need API_BASE_URL because they fetch from the server process,
+  # which stays on the docker network.
   # ---------------------------------------------------------------------------
   palmr-web:
     build:
       # Context scoped to apps/web/ — nothing outside this app is needed.
       context: ./apps/web
       dockerfile: Dockerfile
-      platforms:
-        - linux/amd64
       args:
         PALMR_UID: ${PALMR_UID:-1001}
         PALMR_GID: ${PALMR_GID:-1001}
-    image: sixmonk8s/palmr-web:1.0.0
+    image: ghcr.io/sixmon/palmr-web:latest
     container_name: palmr-web
     restart: unless-stopped
     depends_on:
@@ -166,8 +215,7 @@ services:
     environment:
       API_BASE_URL: http://palmr-server:3333
       NEXT_PUBLIC_DEFAULT_LANGUAGE: ${DEFAULT_LANGUAGE:-en-US}
-    ports:
-      - "${WEB_PORT:-5487}:5487"
+    # No host port — Traefik routes the catch-all (`/`) here.
     networks:
       - palmr
 

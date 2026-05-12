@@ -18,7 +18,7 @@ export const updateConfig = <TData = UpdateConfigResult>(
   updateConfigBody: UpdateConfigBody,
   options?: AxiosRequestConfig
 ): Promise<TData> => {
-  return apiInstance.patch(`/api/config/update/${key}`, updateConfigBody, options);
+  return apiInstance.patch(`/api/app/configs/${key}`, updateConfigBody, options);
 };
 
 /**
@@ -45,5 +45,5 @@ export const bulkUpdateConfigs = <TData = BulkUpdateConfigsResult>(
   bulkUpdateConfigsBody: BulkUpdateConfigsBody,
   options?: AxiosRequestConfig
 ): Promise<TData> => {
-  return apiInstance.patch(`api/config/update/bulk`, bulkUpdateConfigsBody, options);
+  return apiInstance.patch(`/api/app/configs`, bulkUpdateConfigsBody, options);
 };

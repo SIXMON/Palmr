@@ -105,24 +105,24 @@ export class ShareService {
 
     const hashedPassword = password ? await bcrypt.hash(password, BCRYPT_COST) : null;
 
-    // Wrap ShareSecurity + Share creation in a single transaction so a
-    // failure mid-creation can't leave an orphan ShareSecurity row behind.
+    // Both inserts share the same transaction so the Share.securityId FK
+    // can see the ShareSecurity row before Prisma checks the constraint
+    // (without the shared tx the FK lookup ran on the global client and
+    // hit P2003 "Foreign key constraint violated").
     const share = await prisma.$transaction(async (tx) => {
       const security = await tx.shareSecurity.create({
         data: { password: hashedPassword, maxViews },
       });
-      // shareRepository.createShare uses the shared `prisma` client, not
-      // the tx; that's an acceptable trade-off here because the repo
-      // performs a single insert and Prisma's connection pool makes the
-      // window very small. If a regression makes this race observable,
-      // inline the share.create here using `tx`.
-      return this.shareRepository.createShare({
-        ...shareData,
-        files,
-        folders,
-        securityId: security.id,
-        creatorId: userId,
-      });
+      return this.shareRepository.createShare(
+        {
+          ...shareData,
+          files,
+          folders,
+          securityId: security.id,
+          creatorId: userId,
+        },
+        tx
+      );
     });
 
     const shareWithRelations = await this.shareRepository.findShareById(share.id);
@@ -436,6 +436,8 @@ export class ShareService {
         description: file.description,
         extension: file.extension,
         size: file.size,
+        objectName: file.objectName,
+        folderId: file.folderId ?? null,
         createdAt: file.createdAt,
         updatedAt: file.updatedAt,
       })),

@@ -147,6 +147,13 @@ export const CreateShareAliasSchema = z.object({
 /**
  * Public response schema for unauthenticated share access (e.g. /shares/alias/:alias).
  * Excludes creatorId, recipients (PII), and any per-file/per-folder userId leaks.
+ *
+ * `objectName` is intentionally included for files: the web client passes it
+ * back to /files/download-url and /files/preview to fetch the actual bytes,
+ * and those endpoints already enforce share-membership + password checks via
+ * `checkFileShareAccess`. The value itself contains the creator's userId
+ * (a CUID) and a random suffix; no semantic info leaks, so the trade-off
+ * favours keeping the public download/preview flow functional.
  */
 export const PublicShareResponseSchema = z.object({
   id: z.string().describe("The share ID"),
@@ -167,6 +174,8 @@ export const PublicShareResponseSchema = z.object({
       description: z.string().nullable().describe("The file description"),
       extension: z.string().describe("The file extension"),
       size: z.string().describe("The file size"),
+      objectName: z.string().describe("The S3 object key — required by the web client to call /files/download-url"),
+      folderId: z.string().nullable().describe("The folder ID containing this file"),
       createdAt: z.string().describe("The file creation date"),
       updatedAt: z.string().describe("The file update date"),
     })

@@ -1,10 +1,21 @@
-import type { Share, ShareSecurity } from "@prisma/client";
+import type { Prisma, Share, ShareSecurity } from "@prisma/client";
 
 import { prisma } from "../../shared/prisma";
 import type { CreateShareInput } from "./dto";
 
+type PrismaTxClient = Omit<Prisma.TransactionClient, "$on" | "$transaction" | "$use" | "$extends" | "$connect" | "$disconnect">;
+
 export interface IShareRepository {
-  createShare(data: CreateShareInput & { securityId: string; creatorId: string }): Promise<Share>;
+  createShare(
+    data: CreateShareInput & { securityId: string; creatorId: string },
+    /**
+     * Optional Prisma transaction client. The caller passes its tx so the
+     * Share + its FK to ShareSecurity are created in the same transaction —
+     * without this the FK lookup races against the not-yet-committed
+     * ShareSecurity row and Prisma throws P2003.
+     */
+    tx?: PrismaTxClient
+  ): Promise<Share>;
   findShareById(id: string): Promise<
     | (Share & {
         security: ShareSecurity;
@@ -39,7 +50,8 @@ export interface IShareRepository {
 
 export class PrismaShareRepository implements IShareRepository {
   async createShare(
-    data: Omit<CreateShareInput, "password" | "maxViews"> & { securityId: string; creatorId: string }
+    data: Omit<CreateShareInput, "password" | "maxViews"> & { securityId: string; creatorId: string },
+    tx?: PrismaTxClient
   ): Promise<Share> {
     const { files, folders, recipients, expiration, ...shareData } = data;
 
@@ -47,7 +59,9 @@ export class PrismaShareRepository implements IShareRepository {
     const validFolders = (folders ?? []).filter((id) => id && id.trim().length > 0);
     const validRecipients = (recipients ?? []).filter((email) => email && email.trim().length > 0);
 
-    return prisma.share.create({
+    const client = tx ?? prisma;
+
+    return client.share.create({
       data: {
         ...shareData,
         expiration: expiration ? new Date(expiration) : null,

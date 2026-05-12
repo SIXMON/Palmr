@@ -88,7 +88,9 @@ var defaults = []seedRow{
 	{Key: "firstUserAccess", Value: "true", Type: "boolean", Group: "general"},
 	{Key: "maxFileSize", Value: "1073741824", Type: "bigint", Group: "storage"},
 	{Key: "maxTotalStoragePerUser", Value: "10737418240", Type: "bigint", Group: "storage"},
-	{Key: "jwtSecret", Value: "__RANDOM__", Type: "string", Group: "security"},
+	// Note: jwtSecret is intentionally NOT seeded — the runtime reads
+	// the JWT_SECRET env var. A DB row would have no effect and the
+	// admin settings UI would render it as an editable secret.
 	{Key: "maxLoginAttempts", Value: "5", Type: "number", Group: "security"},
 	{Key: "loginBlockDuration", Value: "600", Type: "number", Group: "security"},
 	{Key: "passwordMinLength", Value: "8", Type: "number", Group: "security"},

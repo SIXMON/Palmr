@@ -22,12 +22,14 @@ RUN apk add --no-cache git ca-certificates tzdata
 
 WORKDIR /src
 
-COPY . .
+COPY go.mod go.sum ./
 
 # First boot has no go.sum; tidy generates it. Cached after the first
 # successful build (the module cache lives in /root/go/pkg/mod and is
 # reused unless go.mod changes).
 RUN go mod tidy
+
+COPY . .
 
 # Build flags:
 #   -trimpath           — remove host paths from the binary for reproducibility

@@ -10,27 +10,28 @@ import (
 // EnsureAdmin enforces the same rule as the RequireAdmin chi middleware
 // but inside a huma handler, so we don't need two separate huma APIs:
 //
-//   - users table empty → caller is implicitly authorised (bootstrap)
+//   - users table empty → caller is implicitly authorised (bootstrap),
+//     and we return a zero UserCtx with the all-mighty flag set
 //   - otherwise auth context must exist and be admin
 //
-// Returns nil on success, a sentinel error otherwise. Callers wrap into
-// the right HTTP status via internal/errors.
-func EnsureAdmin(ctx context.Context, db *sqlx.DB) error {
+// The returned UserCtx is the caller (when authenticated) so handlers
+// that need the userId/jti don't have to call FromContext again.
+func EnsureAdmin(ctx context.Context, db *sqlx.DB) (UserCtx, error) {
 	var n int
 	if err := db.GetContext(ctx, &n, `SELECT COUNT(*) FROM users`); err != nil {
-		return errors.New("database error")
+		return UserCtx{}, errors.New("database error")
 	}
 	if n == 0 {
-		return nil
+		return UserCtx{IsAdmin: true}, nil
 	}
 	uc, ok := FromContext(ctx)
 	if !ok {
-		return ErrNoCookie
+		return UserCtx{}, ErrNoCookie
 	}
 	if !uc.IsAdmin {
-		return ErrForbidden
+		return UserCtx{}, ErrForbidden
 	}
-	return nil
+	return uc, nil
 }
 
 // EnsureAuth requires a valid auth context (no bootstrap bypass).

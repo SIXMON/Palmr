@@ -119,7 +119,7 @@ func (h *Handler) ListEnabled(ctx context.Context, _ *struct{}) (*APListOutput, 
 }
 
 func (h *Handler) ListAll(ctx context.Context, _ *struct{}) (*APListOutput, error) {
-	if _, err := auth.EnsureAuth(ctx); err != nil {
+	if _, err := auth.EnsureAdmin(ctx, h.DB); err != nil {
 		return nil, apperr.Unauthorized(err.Error())
 	}
 	out := &APListOutput{}
@@ -135,7 +135,7 @@ type APCreateInput struct{ Body Provider }
 type APSingleOutput struct{ Body struct{ Provider Provider `json:"provider"` } }
 
 func (h *Handler) Create(ctx context.Context, in *APCreateInput) (*APSingleOutput, error) {
-	if _, err := auth.EnsureAuth(ctx); err != nil {
+	if _, err := auth.EnsureAdmin(ctx, h.DB); err != nil {
 		return nil, apperr.Unauthorized(err.Error())
 	}
 	p := in.Body
@@ -164,7 +164,7 @@ type APUpdateInput struct {
 }
 
 func (h *Handler) Update(ctx context.Context, in *APUpdateInput) (*APSingleOutput, error) {
-	if _, err := auth.EnsureAuth(ctx); err != nil {
+	if _, err := auth.EnsureAdmin(ctx, h.DB); err != nil {
 		return nil, apperr.Unauthorized(err.Error())
 	}
 	p := in.Body
@@ -196,7 +196,7 @@ type APReorderInput struct {
 type APMsgOutput struct{ Body struct{ Message string `json:"message"` } }
 
 func (h *Handler) Reorder(ctx context.Context, in *APReorderInput) (*APMsgOutput, error) {
-	if _, err := auth.EnsureAuth(ctx); err != nil {
+	if _, err := auth.EnsureAdmin(ctx, h.DB); err != nil {
 		return nil, apperr.Unauthorized(err.Error())
 	}
 	tx, err := h.DB.BeginTxx(ctx, nil)
@@ -218,7 +218,7 @@ func (h *Handler) Reorder(ctx context.Context, in *APReorderInput) (*APMsgOutput
 type APDeleteInput struct{ ID string `path:"id"` }
 
 func (h *Handler) Delete(ctx context.Context, in *APDeleteInput) (*APMsgOutput, error) {
-	if _, err := auth.EnsureAuth(ctx); err != nil {
+	if _, err := auth.EnsureAdmin(ctx, h.DB); err != nil {
 		return nil, apperr.Unauthorized(err.Error())
 	}
 	if _, err := h.DB.ExecContext(ctx, `DELETE FROM auth_providers WHERE id = ?`, in.ID); err != nil {

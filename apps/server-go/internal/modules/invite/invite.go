@@ -61,7 +61,7 @@ type InviteGetOutput struct {
 }
 
 func (h *Handler) Create(ctx context.Context, in *InviteCreateInput) (*InviteCreateOutput, error) {
-	uc, err := auth.EnsureAuth(ctx)
+	uc, err := auth.EnsureAdmin(ctx, h.DB)
 	if err != nil {
 		return nil, apperr.Unauthorized(err.Error())
 	}
@@ -85,7 +85,7 @@ func (h *Handler) Create(ctx context.Context, in *InviteCreateInput) (*InviteCre
 }
 
 func (h *Handler) List(ctx context.Context, _ *struct{}) (*InviteListOutput, error) {
-	if _, err := auth.EnsureAuth(ctx); err != nil {
+	if _, err := auth.EnsureAdmin(ctx, h.DB); err != nil {
 		return nil, apperr.Unauthorized(err.Error())
 	}
 	out := &InviteListOutput{}

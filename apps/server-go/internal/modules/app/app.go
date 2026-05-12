@@ -12,14 +12,14 @@
 package app
 
 import (
-	dbtypes "github.com/sixmon/palmr/apps/server-go/internal/db"
 	"context"
 	"net/http"
-
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/jmoiron/sqlx"
 
+	"github.com/sixmon/palmr/apps/server-go/internal/auth"
+	dbtypes "github.com/sixmon/palmr/apps/server-go/internal/db"
 	apperr "github.com/sixmon/palmr/apps/server-go/internal/errors"
 )
 
@@ -139,6 +139,9 @@ func (h *Handler) GetPublicConfigs(ctx context.Context, _ *struct{}) (*ConfigsOu
 // -----------------------------------------------------------------------------
 
 func (h *Handler) GetAllConfigs(ctx context.Context, _ *struct{}) (*ConfigsOutput, error) {
+	if _, err := auth.EnsureAdmin(ctx, h.DB); err != nil {
+		return nil, apperr.Forbidden(err.Error())
+	}
 	out := &ConfigsOutput{}
 	rows, err := h.DB.QueryContext(ctx, `SELECT key, value, type, "group", updatedAt FROM app_configs ORDER BY key`)
 	if err != nil {
@@ -173,6 +176,9 @@ type UpdateConfigOutput struct {
 }
 
 func (h *Handler) UpdateConfig(ctx context.Context, in *UpdateConfigInput) (*UpdateConfigOutput, error) {
+	if _, err := auth.EnsureAdmin(ctx, h.DB); err != nil {
+		return nil, apperr.Forbidden(err.Error())
+	}
 	res, err := h.DB.ExecContext(ctx,
 		`UPDATE app_configs SET value = ?, updatedAt = CURRENT_TIMESTAMP WHERE key = ?`,
 		in.Body.Value, in.Key)
@@ -207,6 +213,9 @@ type BulkUpdateInput struct {
 }
 
 func (h *Handler) BulkUpdateConfigs(ctx context.Context, in *BulkUpdateInput) (*ConfigsOutput, error) {
+	if _, err := auth.EnsureAdmin(ctx, h.DB); err != nil {
+		return nil, apperr.Forbidden(err.Error())
+	}
 	tx, err := h.DB.BeginTxx(ctx, nil)
 	if err != nil {
 		return nil, apperr.Internal("begin tx")

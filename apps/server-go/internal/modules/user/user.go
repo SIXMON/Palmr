@@ -196,6 +196,9 @@ type UserListOutput struct {
 }
 
 func (h *Handler) List(ctx context.Context, _ *struct{}) (*UserListOutput, error) {
+	if _, err := humaauth.EnsureAdmin(ctx, h.DB); err != nil {
+		return nil, apperr.Forbidden(err.Error())
+	}
 	out := &UserListOutput{}
 	if err := h.DB.SelectContext(ctx, &out.Body.Users,
 		`SELECT id, firstName, lastName, username, email, image, isAdmin, isActive, createdAt, updatedAt
@@ -215,6 +218,9 @@ type GetByIDOutput struct {
 }
 
 func (h *Handler) GetByID(ctx context.Context, in *GetByIDInput) (*GetByIDOutput, error) {
+	if _, err := humaauth.EnsureAdmin(ctx, h.DB); err != nil {
+		return nil, apperr.Forbidden(err.Error())
+	}
 	u, err := h.loadUser(ctx, in.ID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -294,6 +300,9 @@ type UserDeleteOutput struct {
 }
 
 func (h *Handler) Delete(ctx context.Context, in *GetByIDInput) (*UserDeleteOutput, error) {
+	if _, err := humaauth.EnsureAdmin(ctx, h.DB); err != nil {
+		return nil, apperr.Forbidden(err.Error())
+	}
 	res, err := h.DB.ExecContext(ctx, `DELETE FROM users WHERE id = ?`, in.ID)
 	if err != nil {
 		return nil, apperr.Internal("delete user")
@@ -319,6 +328,9 @@ func (h *Handler) Deactivate(ctx context.Context, in *GetByIDInput) (*GetByIDOut
 }
 
 func (h *Handler) setActive(ctx context.Context, id string, active bool) (*GetByIDOutput, error) {
+	if _, err := humaauth.EnsureAdmin(ctx, h.DB); err != nil {
+		return nil, apperr.Forbidden(err.Error())
+	}
 	if _, err := h.DB.ExecContext(ctx, `UPDATE users SET isActive = ?, updatedAt = CURRENT_TIMESTAMP WHERE id = ?`, active, id); err != nil {
 		return nil, apperr.Internal("update user")
 	}

@@ -90,6 +90,7 @@ func Register(api huma.API, h *Handler) {
 	huma.Register(api, op(http.MethodGet, "/reverse-shares/files/{fileId}/download", "downloadReverseShareFile"), h.DownloadFile)
 	huma.Register(api, op(http.MethodDelete, "/reverse-shares/files/{fileId}", "deleteReverseShareFile"), h.DeleteFile)
 	huma.Register(api, op(http.MethodPut, "/reverse-shares/files/{fileId}", "updateReverseShareFile"), h.UpdateFile)
+	huma.Register(api, op(http.MethodPost, "/reverse-shares/files/{fileId}/copy", "copyReverseShareFile"), h.CopyFile)
 
 	// Public (anonymous) endpoints by alias
 	huma.Register(api, op(http.MethodGet, "/reverse-shares/alias/{alias}/upload", "getReverseShareUpload"), h.PublicGet)
@@ -989,4 +990,73 @@ func (h *Handler) validateUpload(ctx context.Context, rs ReverseShare, password,
 		}
 	}
 	return nil
+}
+
+// -----------------------------------------------------------------------------
+// POST /reverse-shares/files/{fileId}/copy
+//
+// Copy a file that landed in a reverse-share into the owner's own
+// `files` table — so they can re-share it like any uploaded file. The
+// S3 object is duplicated server-side (CopyObject), not streamed
+// through the API.
+// -----------------------------------------------------------------------------
+
+type RSCopyOutput struct {
+	Body struct {
+		FileID     string `json:"fileId"`
+		ObjectName string `json:"objectName"`
+	}
+}
+
+func (h *Handler) CopyFile(ctx context.Context, in *RSFileInput) (*RSCopyOutput, error) {
+	uc, err := auth.EnsureAuth(ctx)
+	if err != nil {
+		return nil, apperr.Unauthorized(err.Error())
+	}
+
+	// Load source + ownership check.
+	var ownerID, srcObj, name, ext string
+	var size int64
+	err = h.DB.QueryRowContext(ctx, `
+		SELECT rs.creatorId, f.objectName, f.name, f.extension, f.size
+		FROM reverse_share_files f JOIN reverse_shares rs ON rs.id = f.reverseShareId
+		WHERE f.id = ?`, in.FileID).Scan(&ownerID, &srcObj, &name, &ext, &size)
+	if err != nil {
+		return nil, apperr.NotFound("file not found")
+	}
+	if ownerID != uc.UserID {
+		return nil, apperr.Forbidden("not your reverse-share")
+	}
+	if h.S3 == nil {
+		return nil, apperr.Internal("S3 not configured")
+	}
+
+	// Server-side copy. CopySource expects "<bucket>/<key>" with URL-escaped key.
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	dstObj := uc.UserID + "/" + time.Now().UTC().Format("20060102150405") + "-" + hex.EncodeToString(b) + "." + ext
+	_, err = h.S3.Client.CopyObject(ctx, &s3.CopyObjectInput{
+		Bucket:     aws.String(h.S3.Bucket),
+		Key:        aws.String(dstObj),
+		CopySource: aws.String(h.S3.Bucket + "/" + srcObj),
+	})
+	if err != nil {
+		return nil, apperr.Internal("copy object: " + err.Error())
+	}
+
+	// Insert into files. We use sql import via *sqlx.DB; the SQL is the
+	// same one the file module's RegisterFile uses.
+	id := uuid.NewString()
+	now := time.Now().UTC()
+	_, err = h.DB.ExecContext(ctx, `
+		INSERT INTO files (id, name, description, extension, size, objectName, userId, folderId, createdAt, updatedAt)
+		VALUES (?, ?, NULL, ?, ?, ?, ?, NULL, ?, ?)`,
+		id, name, ext, size, dstObj, uc.UserID, now, now)
+	if err != nil {
+		return nil, apperr.Internal("insert file: " + err.Error())
+	}
+	out := &RSCopyOutput{}
+	out.Body.FileID = id
+	out.Body.ObjectName = dstObj
+	return out, nil
 }

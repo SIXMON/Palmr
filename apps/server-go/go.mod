@@ -18,6 +18,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/credentials v1.17.47
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.71.0
 	golang.org/x/crypto v0.31.0
+	golang.org/x/image v0.23.0
 	golang.org/x/oauth2 v0.24.0
 	modernc.org/sqlite v1.34.2
 )

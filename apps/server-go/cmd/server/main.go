@@ -33,6 +33,7 @@ import (
 	"github.com/sixmon/palmr/apps/server-go/internal/modules/share"
 	storagemod "github.com/sixmon/palmr/apps/server-go/internal/modules/storage"
 	"github.com/sixmon/palmr/apps/server-go/internal/modules/twofactor"
+	"github.com/sixmon/palmr/apps/server-go/internal/modules/uploads"
 	"github.com/sixmon/palmr/apps/server-go/internal/modules/user"
 	"github.com/sixmon/palmr/apps/server-go/internal/storage"
 )
@@ -149,6 +150,13 @@ func run() error {
 	// -------------------------------------------------------------------------
 	embedH := &embedmod.Handler{DB: conn, S3: s3client}
 	embedH.RegisterPlain(r)
+
+	// -------------------------------------------------------------------------
+	// Multipart upload routes (avatars + app logo) — chi-native because
+	// huma's multipart story isn't mature enough yet.
+	// -------------------------------------------------------------------------
+	upH := &uploads.Handler{DB: conn, SecureSite: cfg.SecureSite}
+	upH.Register(r)
 
 	// JTI sweep
 	go func() {

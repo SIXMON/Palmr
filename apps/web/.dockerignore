@@ -1,0 +1,11 @@
+# Build context = apps/web/. Keep only what the Dockerfile actually needs.
+node_modules
+.next
+.env
+.env.*
+*.log
+
+# IDE / OS
+.idea
+.vscode
+.DS_Store

@@ -1,6 +1,8 @@
 import { FastifyReply, FastifyRequest } from "fastify";
 
+import { authCookieOptions } from "../../shared/cookies";
 import { replyWithError } from "../../shared/errors";
+import { signSessionJwt } from "../../shared/jwt-sign";
 import { AvatarService } from "./avatar.service";
 import { createRegisterUserSchema, UpdateUserImageSchema, UpdateUserSchema } from "./dto";
 import { UserService } from "./service";
@@ -14,6 +16,19 @@ export class UserController {
       const schema = await createRegisterUserSchema();
       const input = schema.parse(request.body);
       const user = await this.userService.register(input);
+
+      // Auto-login the very first user (the bootstrap admin). Without this,
+      // the frontend's post-register flow — which calls admin endpoints like
+      // PATCH /app/configs/firstUserAccess to flip the bootstrap flag — would
+      // hit 401 because requireAdmin only bypasses auth when usersCount===0,
+      // and the freshly-created user has bumped the count to 1. Subsequent
+      // /auth/register calls (admin-creating-other-admins) keep working as
+      // before: requireAdmin runs, the caller's cookie is already there.
+      if (user.isAdmin) {
+        const token = await signSessionJwt(request, { userId: user.id, isAdmin: user.isAdmin });
+        reply.setCookie("token", token, authCookieOptions);
+      }
+
       return reply.status(201).send({ user, message: "User created successfully" });
     } catch (error) {
       return replyWithError(reply, error);

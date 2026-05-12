@@ -1,0 +1,15 @@
+# Build context = apps/server/. Keep only what the Dockerfile actually needs.
+node_modules
+dist
+.env
+.env.*
+*.log
+
+# Local SQLite — never bake into the image.
+prisma/*.db
+prisma/*.db-journal
+
+# IDE / OS
+.idea
+.vscode
+.DS_Store

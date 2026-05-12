@@ -132,9 +132,9 @@ COPY infra/server-start.sh /app/server-start.sh
 COPY infra/start-minio.sh /app/start-minio.sh
 COPY infra/minio-setup.sh /app/minio-setup.sh
 COPY infra/load-minio-credentials.sh /app/load-minio-credentials.sh
-COPY infra/configs.json /app/infra/configs.json
-COPY infra/providers.json /app/infra/providers.json
-COPY infra/check-missing.js /app/infra/check-missing.js
+COPY apps/server/prisma/configs.json /app/infra/configs.json
+COPY apps/server/prisma/providers.json /app/infra/providers.json
+COPY apps/server/prisma/check-missing.js /app/infra/check-missing.js
 RUN chmod +x /app/server-start.sh /app/start-minio.sh /app/minio-setup.sh /app/load-minio-credentials.sh
 RUN chown -R palmr:nodejs /app/server-start.sh /app/start-minio.sh /app/minio-setup.sh /app/load-minio-credentials.sh /app/infra
 

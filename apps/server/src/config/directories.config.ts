@@ -15,7 +15,10 @@ export interface DirectoryConfig {
   tempUploads: string;
 }
 
-const BASE_DIR = IS_RUNNING_IN_CONTAINER ? "/app/server" : process.cwd();
+// The base data directory can be overridden via env so the split-container
+// deployment can put it on a dedicated volume (`DATA_DIR=/data`) instead of
+// the (potentially read-only) image filesystem at /app/server.
+const BASE_DIR = process.env.DATA_DIR || (IS_RUNNING_IN_CONTAINER ? "/app/server" : process.cwd());
 
 export const directoriesConfig: DirectoryConfig = {
   baseDir: BASE_DIR,

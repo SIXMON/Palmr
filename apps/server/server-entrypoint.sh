@@ -57,7 +57,13 @@ if [ ! -f /data/prisma/palmr.db ]; then
   run_as_user node ./prisma/seed.js
 else
   echo "♻️  Existing database — applying schema changes"
-  run_as_user npx prisma db push --schema=./prisma/schema.prisma --skip-generate
+
+  # Cleanup orphan rows that would block the NOT NULL migration introduced
+  # by the security audit (Share.creatorId went from optional+SetNull to
+  # required+Cascade). The script is idempotent and a no-op on fresh DBs.
+  run_as_user node ./prisma/pre-migrate.js
+
+  run_as_user npx prisma db push --schema=./prisma/schema.prisma --skip-generate --accept-data-loss
 
   if [ -f /data/prisma/check-missing.js ]; then
     NEEDS_SEEDING=$(run_as_user node /data/prisma/check-missing.js check-seeding 2>/dev/null || echo "true")

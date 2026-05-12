@@ -7,6 +7,7 @@ import (
 	"github.com/jmoiron/sqlx"
 
 	"github.com/sixmon/palmr/apps/server-go/internal/cookies"
+	apperr "github.com/sixmon/palmr/apps/server-go/internal/errors"
 )
 
 type ctxKey int
@@ -55,7 +56,7 @@ func (m *Middleware) RequireAuth(next http.Handler) http.Handler {
 			if cookies.Read(r) != "" {
 				cookies.Clear(w, m.SecureSite)
 			}
-			http.Error(w, err.Error(), http.StatusUnauthorized)
+			apperr.WriteJSON(w, http.StatusUnauthorized, err.Error())
 			return
 		}
 		ctx := context.WithValue(r.Context(), userCtxKey, uc)
@@ -71,7 +72,7 @@ func (m *Middleware) RequireAdmin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var n int
 		if err := m.DB.GetContext(r.Context(), &n, `SELECT COUNT(*) FROM users`); err != nil {
-			http.Error(w, "database error", http.StatusInternalServerError)
+			apperr.WriteJSON(w, http.StatusInternalServerError, "database error")
 			return
 		}
 		if n == 0 {
@@ -89,11 +90,11 @@ func (m *Middleware) RequireAdmin(next http.Handler) http.Handler {
 			if cookies.Read(r) != "" {
 				cookies.Clear(w, m.SecureSite)
 			}
-			http.Error(w, err.Error(), http.StatusUnauthorized)
+			apperr.WriteJSON(w, http.StatusUnauthorized, err.Error())
 			return
 		}
 		if !uc.IsAdmin {
-			http.Error(w, "Access restricted to administrators", http.StatusForbidden)
+			apperr.WriteJSON(w, http.StatusForbidden, "Access restricted to administrators")
 			return
 		}
 		ctx := context.WithValue(r.Context(), userCtxKey, uc)

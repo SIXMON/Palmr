@@ -25,6 +25,7 @@ import (
 	"github.com/jmoiron/sqlx"
 
 	"github.com/sixmon/palmr/apps/server-go/internal/auth"
+	apperr "github.com/sixmon/palmr/apps/server-go/internal/errors"
 	"github.com/sixmon/palmr/apps/server-go/internal/imageresize"
 )
 
@@ -57,18 +58,18 @@ func (h *Handler) Register(r chi.Router) {
 func (h *Handler) uploadOwnAvatar(w http.ResponseWriter, r *http.Request) {
 	uc, ok := auth.FromContext(r.Context())
 	if !ok {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		apperr.WriteJSON(w, http.StatusUnauthorized, "Unauthorized")
 		return
 	}
 	dataURI, err := h.readAndProcess(r, maxAvatarBytes, avatarPx, imageresize.JPEG)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		apperr.WriteJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if _, err := h.DB.ExecContext(r.Context(),
 		`UPDATE users SET image = ?, updatedAt = CURRENT_TIMESTAMP WHERE id = ?`,
 		dataURI, uc.UserID); err != nil {
-		http.Error(w, "update user", http.StatusInternalServerError)
+		apperr.WriteJSON(w, http.StatusInternalServerError, "update user")
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -78,13 +79,13 @@ func (h *Handler) uploadOwnAvatar(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) removeOwnAvatar(w http.ResponseWriter, r *http.Request) {
 	uc, ok := auth.FromContext(r.Context())
 	if !ok {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		apperr.WriteJSON(w, http.StatusUnauthorized, "Unauthorized")
 		return
 	}
 	if _, err := h.DB.ExecContext(r.Context(),
 		`UPDATE users SET image = NULL, updatedAt = CURRENT_TIMESTAMP WHERE id = ?`,
 		uc.UserID); err != nil {
-		http.Error(w, "update user", http.StatusInternalServerError)
+		apperr.WriteJSON(w, http.StatusInternalServerError, "update user")
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -94,19 +95,19 @@ func (h *Handler) removeOwnAvatar(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) adminSetUserAvatar(w http.ResponseWriter, r *http.Request) {
 	uc, ok := auth.FromContext(r.Context())
 	if !ok || !uc.IsAdmin {
-		http.Error(w, "admin only", http.StatusForbidden)
+		apperr.WriteJSON(w, http.StatusForbidden, "admin only")
 		return
 	}
 	id := chi.URLParam(r, "id")
 	dataURI, err := h.readAndProcess(r, maxAvatarBytes, avatarPx, imageresize.JPEG)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		apperr.WriteJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if _, err := h.DB.ExecContext(r.Context(),
 		`UPDATE users SET image = ?, updatedAt = CURRENT_TIMESTAMP WHERE id = ?`,
 		dataURI, id); err != nil {
-		http.Error(w, "update user", http.StatusInternalServerError)
+		apperr.WriteJSON(w, http.StatusInternalServerError, "update user")
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -120,18 +121,18 @@ func (h *Handler) adminSetUserAvatar(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) uploadAppLogo(w http.ResponseWriter, r *http.Request) {
 	uc, ok := auth.FromContext(r.Context())
 	if !ok || !uc.IsAdmin {
-		http.Error(w, "admin only", http.StatusForbidden)
+		apperr.WriteJSON(w, http.StatusForbidden, "admin only")
 		return
 	}
 	dataURI, err := h.readAndProcess(r, maxLogoBytes, logoPx, imageresize.PNG)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		apperr.WriteJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if _, err := h.DB.ExecContext(r.Context(),
 		`UPDATE app_configs SET value = ?, updatedAt = CURRENT_TIMESTAMP WHERE key = 'appLogo'`,
 		dataURI); err != nil {
-		http.Error(w, "update logo", http.StatusInternalServerError)
+		apperr.WriteJSON(w, http.StatusInternalServerError, "update logo")
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -141,12 +142,12 @@ func (h *Handler) uploadAppLogo(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) removeAppLogo(w http.ResponseWriter, r *http.Request) {
 	uc, ok := auth.FromContext(r.Context())
 	if !ok || !uc.IsAdmin {
-		http.Error(w, "admin only", http.StatusForbidden)
+		apperr.WriteJSON(w, http.StatusForbidden, "admin only")
 		return
 	}
 	if _, err := h.DB.ExecContext(r.Context(),
 		`UPDATE app_configs SET value = '', updatedAt = CURRENT_TIMESTAMP WHERE key = 'appLogo'`); err != nil {
-		http.Error(w, "update logo", http.StatusInternalServerError)
+		apperr.WriteJSON(w, http.StatusInternalServerError, "update logo")
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

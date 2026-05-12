@@ -13,6 +13,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jmoiron/sqlx"
 
+	apperr "github.com/sixmon/palmr/apps/server-go/internal/errors"
 	"github.com/sixmon/palmr/apps/server-go/internal/storage"
 )
 
@@ -36,7 +37,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.S3 == nil {
-		http.Error(w, "S3 not configured", http.StatusInternalServerError)
+		apperr.WriteJSON(w, http.StatusInternalServerError, "S3 not configured")
 		return
 	}
 	out, err := h.S3.Client.GetObject(context.Background(), &s3.GetObjectInput{
@@ -44,7 +45,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 		Key:    aws.String(obj),
 	})
 	if err != nil {
-		http.Error(w, "fetch: "+err.Error(), http.StatusBadGateway)
+		apperr.WriteJSON(w, http.StatusBadGateway, "fetch: "+err.Error())
 		return
 	}
 	defer out.Body.Close()

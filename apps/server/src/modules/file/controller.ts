@@ -3,6 +3,7 @@ import { FastifyReply, FastifyRequest } from "fastify";
 
 import { env } from "../../env";
 import { prisma } from "../../shared/prisma";
+import { getSharePassword } from "../../shared/share-password";
 import {
   generateUniqueFileName,
   generateUniqueFileNameForRename,
@@ -277,10 +278,12 @@ export class FileController {
 
   async getDownloadUrl(request: FastifyRequest, reply: FastifyReply) {
     try {
-      const { objectName, password } = request.query as {
-        objectName: string;
-        password?: string;
-      };
+      const { objectName } = request.query as { objectName: string };
+      // Accept the share password from EITHER the querystring or the
+      // X-Share-Password header — the web client uses the header form so the
+      // secret doesn't show up in browser history; older clients use the
+      // query string.
+      const password = getSharePassword(request);
 
       if (!objectName) {
         return reply.status(400).send({ error: "The 'objectName' parameter is required." });
@@ -318,10 +321,9 @@ export class FileController {
 
   async downloadFile(request: FastifyRequest, reply: FastifyReply) {
     try {
-      const { objectName, password } = request.query as {
-        objectName: string;
-        password?: string;
-      };
+      const { objectName } = request.query as { objectName: string };
+      // Mirror getDownloadUrl: accept the password from header or query.
+      const password = getSharePassword(request);
 
       if (!objectName) {
         return reply.status(400).send({ error: "The 'objectName' parameter is required." });
@@ -604,7 +606,9 @@ export class FileController {
   async embedFile(request: FastifyRequest, reply: FastifyReply) {
     try {
       const { id } = request.params as { id: string };
-      const { password } = request.query as { password?: string };
+      // Accept the share password from header or query — same rationale as
+      // getDownloadUrl. The preview hook in the web client uses the header.
+      const password = getSharePassword(request);
 
       if (!id) {
         return reply.status(400).send({ error: "File ID is required." });

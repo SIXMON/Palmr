@@ -108,29 +108,43 @@ export const isInternalStorage = s3Client !== null && env.ENABLE_S3 !== "true";
 
 /**
  * Creates a public S3 client for presigned URL generation.
- * - Internal storage (ENABLE_S3=false): Uses STORAGE_URL (e.g., https://syrg.palmr.com)
- * - External S3 (ENABLE_S3=true): Uses the original S3 endpoint configuration
  *
- * @returns S3Client configured with public endpoint, or null if S3 is disabled
+ * The presigned URL goes to the BROWSER, so it must point at an endpoint
+ * the browser can actually reach. That's almost never the same as the
+ * server-side endpoint:
+ *   - Internal storage (legacy monolithic image): server talks to MinIO on
+ *     127.0.0.1:9379, browser needs an external URL → STORAGE_URL required.
+ *   - Split-container setup: server talks to MinIO via the docker DNS name
+ *     (e.g. `minio:9379`) — completely unreachable from outside the docker
+ *     network. STORAGE_URL is required here too.
+ *   - True external S3 (AWS, R2, etc.): the configured endpoint is already
+ *     public, so STORAGE_URL is optional and we fall back to it.
+ *
+ * Previously this function only honoured STORAGE_URL when isInternalStorage
+ * was true, which made the split compose hand out presigned URLs pointing
+ * at `http://minio:9379/...` — fine for the server, useless for browsers.
+ *
+ * @returns S3Client configured with the public endpoint, or null if S3
+ *          isn't configured at all.
  */
 export function createPublicS3Client(): S3Client | null {
   if (!s3Client) {
     return null;
   }
 
+  // Prefer STORAGE_URL whenever it's set — it always wins over the
+  // server-side endpoint because it represents the browser's view.
   let publicEndpoint: string;
-
-  if (isInternalStorage) {
-    // Internal storage: use STORAGE_URL
-    if (!env.STORAGE_URL) {
-      throw new Error(
-        "[STORAGE] STORAGE_URL environment variable is required when using internal storage (ENABLE_S3=false). " +
-          "Set STORAGE_URL to your public storage URL with protocol (e.g., https://syrg.palmr.com or http://192.168.1.100:9379)"
-      );
-    }
+  if (env.STORAGE_URL) {
     publicEndpoint = env.STORAGE_URL;
+  } else if (isInternalStorage) {
+    throw new Error(
+      "[STORAGE] STORAGE_URL environment variable is required when using internal storage (ENABLE_S3=false). " +
+        "Set STORAGE_URL to your public storage URL with protocol (e.g., https://storage.example.com)."
+    );
   } else {
-    // External S3: use the original endpoint configuration
+    // True external S3 with no STORAGE_URL override: the original endpoint
+    // is assumed to be reachable from the browser (the AWS case).
     publicEndpoint = storageConfig.useSSL
       ? `https://${storageConfig.endpoint}${storageConfig.port ? `:${storageConfig.port}` : ""}`
       : `http://${storageConfig.endpoint}${storageConfig.port ? `:${storageConfig.port}` : ""}`;

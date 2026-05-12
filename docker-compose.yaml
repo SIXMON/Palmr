@@ -94,10 +94,12 @@ services:
       # travel with this context.
       context: ./apps/server
       dockerfile: Dockerfile
+      platforms:
+        - linux/amd64
       args:
         PALMR_UID: ${PALMR_UID:-1001}
         PALMR_GID: ${PALMR_GID:-1001}
-    image: palmr/server:local
+    image: sixmonk8s/palmr-server:1.0.0
     container_name: palmr-server
     restart: unless-stopped
     depends_on:
@@ -150,10 +152,12 @@ services:
       # Context scoped to apps/web/ — nothing outside this app is needed.
       context: ./apps/web
       dockerfile: Dockerfile
+      platforms:
+        - linux/amd64
       args:
         PALMR_UID: ${PALMR_UID:-1001}
         PALMR_GID: ${PALMR_GID:-1001}
-    image: palmr/web:local
+    image: sixmonk8s/palmr-web:1.0.0
     container_name: palmr-web
     restart: unless-stopped
     depends_on:

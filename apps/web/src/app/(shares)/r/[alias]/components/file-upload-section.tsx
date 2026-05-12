@@ -67,17 +67,25 @@ export function FileUploadSection({ reverseShare, password, alias, onUploadSucce
       }
     },
     onBeforeUpload: async (file) => {
-      const timestamp = Date.now();
-      const sanitizedFileName = file.name.replace(/[^a-zA-Z0-9.-]/g, "_");
-      return `reverse-shares/${alias}/${timestamp}-${sanitizedFileName}`;
+      // The backend now generates the real object key (CRITICAL security
+      // fix: clients used to be able to overwrite arbitrary S3 paths by
+      // crafting `objectName`). We just return the raw filename here so it
+      // flows into `getPresignedUrl` below — the actual key comes back from
+      // the server.
+      return file.name;
     },
-    getPresignedUrl: async (objectName) => {
+    getPresignedUrl: async (filenameWithExt, extension) => {
+      const filename = filenameWithExt.replace(/\.[^.]+$/, "") || filenameWithExt;
       const response = await getPresignedUrlForUploadByAlias(
         alias,
-        { objectName },
+        { filename, extension },
         password ? { password } : undefined
       );
-      return { url: response.data.url, method: "PUT" };
+      return {
+        url: response.data.url,
+        method: "PUT",
+        actualObjectName: response.data.objectName,
+      };
     },
     onAfterUpload: async (fileId, file, objectName) => {
       const fileExtension = file.name.split(".").pop() || "";

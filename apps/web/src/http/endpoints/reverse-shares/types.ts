@@ -91,6 +91,7 @@ export interface UpdateReverseSharePassword200 {
 
 export interface GetPresignedUrl200 {
   url: string;
+  objectName: string;
   expiresIn: number;
 }
 
@@ -156,7 +157,9 @@ export interface UpdateReverseSharePasswordBody {
 }
 
 export interface GetPresignedUrlBody {
-  objectName: string;
+  filename: string;
+  extension: string;
+  size?: number;
 }
 
 export interface RegisterFileUploadBody {

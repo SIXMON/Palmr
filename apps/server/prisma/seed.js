@@ -30,8 +30,13 @@ const defaultConfigs = [
     group: "general",
   },
   {
+    // Empty by default — operators upload their own logo via the admin UI.
+    // Previously this defaulted to a third-party CDN URL, which created a
+    // supply-chain dependency: every fresh install fetched a remote image,
+    // and a compromise of that host would render arbitrary content in
+    // every Palmr instance.
     key: "appLogo",
-    value: "https://i.ibb.co/gMpk75bZ/Group.png",
+    value: "",
     type: "string",
     group: "general",
   },

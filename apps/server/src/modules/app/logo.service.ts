@@ -21,12 +21,10 @@ export class LogoService {
           fit: "contain",
           background: { r: 255, g: 255, b: 255, alpha: 0 },
         })
-        .webp({
-          quality: 60,
-          effort: 6,
-          alphaQuality: 100,
-          lossless: true,
-        })
+        // Logos are small and tend to have sharp edges; effort=6 + quality=85
+        // is a good balance. `lossless: true` (the previous setting) made
+        // `quality: 60` a no-op.
+        .webp({ quality: 85, effort: 6, alphaQuality: 100 })
         .toBuffer();
 
       return `data:image/webp;base64,${webpBuffer.toString("base64")}`;

@@ -1,35 +1,14 @@
 import { FastifyInstance } from "fastify";
 import { z } from "zod";
 
-import { prisma } from "../../shared/prisma";
+import { requireAdmin } from "../../shared/auth";
 import { AppController } from "./controller";
 import { BulkUpdateConfigSchema, ConfigResponseSchema } from "./dto";
 
 export async function appRoutes(app: FastifyInstance) {
   const appController = new AppController();
 
-  const adminPreValidation = async (request: any, reply: any) => {
-    try {
-      const usersCount = await prisma.user.count();
-
-      if (usersCount <= 1) {
-        return;
-      }
-
-      await request.jwtVerify();
-
-      if (!request.user.isAdmin) {
-        return reply.status(403).send({
-          error: "Access restricted to administrators",
-        });
-      }
-    } catch (err) {
-      console.error(err);
-      return reply.status(401).send({
-        error: ".",
-      });
-    }
-  };
+  const adminPreValidation = requireAdmin;
 
   app.get(
     "/app/info",

@@ -26,12 +26,10 @@ export class AvatarService {
           fit: "cover",
           background: { r: 255, g: 255, b: 255, alpha: 0 },
         })
-        .webp({
-          quality: 60,
-          effort: 6,
-          alphaQuality: 100,
-          lossless: true,
-        })
+        // Lossy at quality=80 keeps avatars visually clean while staying
+        // ~5x smaller than the previous lossless config. `quality` was
+        // being silently ignored alongside `lossless: true` anyway.
+        .webp({ quality: 80, effort: 6, alphaQuality: 100 })
         .toBuffer();
 
       return `data:image/webp;base64,${webpBuffer.toString("base64")}`;

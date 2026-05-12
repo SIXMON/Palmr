@@ -182,6 +182,13 @@ export class AppService {
       throw new Error("Configuration not found");
     }
 
+    // jwtSecret happens to be flagged isSystem; rejecting isSystem updates
+    // here gives us a single chokepoint for "do not allow modifying this
+    // row through the public config endpoint" beyond the allowlist above.
+    if (config.isSystem && key === "jwtSecret") {
+      throw new Error("JWT secret cannot be edited through this endpoint");
+    }
+
     return prisma.appConfig.update({
       where: { key },
       data: { value: canonical },

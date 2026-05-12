@@ -1,7 +1,26 @@
 import { FastifyReply, FastifyRequest } from "fastify";
 
+import { authCookieOptions } from "./cookies";
 import { isJtiRevoked } from "./jwt-revocation";
 import { prisma } from "./prisma";
+
+/**
+ * Tell the browser to drop the auth cookie. Used when we know the cookie
+ * the browser sent is unusable (revoked, references a deleted user, etc) —
+ * without this the browser keeps replaying the same dead cookie on every
+ * subsequent request and the user gets stuck on a 401 loop until they
+ * manually clear site data.
+ *
+ * Matches the path/sameSite/secure attributes of authCookieOptions so the
+ * delete actually targets the right cookie.
+ */
+function clearAuthCookie(reply: any) {
+  reply.clearCookie("token", {
+    path: authCookieOptions.path,
+    sameSite: authCookieOptions.sameSite,
+    secure: authCookieOptions.secure,
+  });
+}
 
 // NOTE: signatures use `any` (rather than typed FastifyRequest/FastifyReply)
 // because typed-provider routes in this codebase infer request types from the
@@ -17,11 +36,17 @@ export async function requireAuth(request: any, reply: any) {
   try {
     await request.jwtVerify();
   } catch {
+    // The browser sent a token cookie that doesn't verify — clear it so the
+    // next request retries with an empty cookie instead of looping on 401.
+    if (request.cookies?.token) {
+      clearAuthCookie(reply);
+    }
     return reply.status(401).send({ error: "Unauthorized: a valid token is required to access this resource." });
   }
   // Reject revoked JWTs (e.g. after explicit logout) even though they are
   // still cryptographically valid until exp.
   if (isJtiRevoked(request.user?.jti)) {
+    clearAuthCookie(reply);
     return reply.status(401).send({ error: "Session expired. Please log in again." });
   }
 }
@@ -36,16 +61,26 @@ export async function requireAdmin(request: any, reply: any) {
   try {
     const usersCount = await prisma.user.count();
     if (usersCount === 0) {
+      // Bootstrap path. If the browser happens to be carrying a leftover
+      // token from a previous instance, drop it on the way out so the
+      // freshly issued first-admin cookie isn't shadowed by the old one.
+      if (request.cookies?.token) {
+        clearAuthCookie(reply);
+      }
       return;
     }
 
     try {
       await request.jwtVerify();
     } catch {
+      if (request.cookies?.token) {
+        clearAuthCookie(reply);
+      }
       return reply.status(401).send({ error: "Unauthorized: a valid token is required to access this resource." });
     }
 
     if (isJtiRevoked(request.user?.jti)) {
+      clearAuthCookie(reply);
       return reply.status(401).send({ error: "Session expired. Please log in again." });
     }
 
@@ -60,7 +95,17 @@ export async function requireAdmin(request: any, reply: any) {
       where: { id: userId },
       select: { isAdmin: true, isActive: true },
     });
-    if (!dbUser || !dbUser.isActive) {
+    if (!dbUser) {
+      // The JWT references a user that no longer exists in the DB (deleted
+      // user, restored from backup, wiped dev DB, etc). Without clearing
+      // the cookie here the browser keeps sending the dead token on every
+      // request and the user is stuck in a 401 loop they can't recover
+      // from without manually purging localStorage/cookies.
+      clearAuthCookie(reply);
+      return reply.status(401).send({ error: "Session expired. Please log in again." });
+    }
+    if (!dbUser.isActive) {
+      clearAuthCookie(reply);
       return reply.status(401).send({ error: "Account is inactive" });
     }
     if (!dbUser.isAdmin) {

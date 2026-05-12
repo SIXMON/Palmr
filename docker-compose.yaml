@@ -191,6 +191,68 @@ services:
       - palmr
 
   # ---------------------------------------------------------------------------
+  # WIP — Go rewrite of the backend (apps/server-go). Same SQLite DB and
+  # the same /data layout as the Node backend, so they can coexist for the
+  # duration of the port.
+  #
+  # Behind the `go-backend` compose profile so it stays inert by default:
+  #
+  #     docker compose --profile go-backend build palmr-server-go
+  #     docker compose --profile go-backend up -d palmr-server-go
+  #
+  # MVP scope (today): /health, /app/*, /auth/{login,logout,me,register},
+  # /users/*. Everything else still has to be served by palmr-server. See
+  # apps/server-go/README.md for the porting checklist.
+  # ---------------------------------------------------------------------------
+  palmr-server-go:
+    profiles: ["go-backend"]
+    build:
+      context: ./apps/server-go
+      dockerfile: Dockerfile
+      platforms:
+        - linux/amd64
+    image: ghcr.io/sixmon/palmr-server-go:dev
+    container_name: palmr-server-go
+    restart: unless-stopped
+    depends_on:
+      minio:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required (at least 32 chars)}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:?CORS_ALLOWED_ORIGINS is required (comma-separated)}
+      SECURE_SITE: ${SECURE_SITE:-true}
+      MAX_BODY_SIZE_MB: ${MAX_BODY_SIZE_MB:-100}
+      BCRYPT_COST: ${BCRYPT_COST:-12}
+      PRESIGNED_URL_EXPIRATION: ${PRESIGNED_URL_EXPIRATION:-3600}
+      ENABLE_S3: "true"
+      S3_ENDPOINT: minio
+      S3_PORT: "9379"
+      S3_USE_SSL: "false"
+      S3_FORCE_PATH_STYLE: "true"
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      S3_BUCKET_NAME: ${MINIO_BUCKET:-palmr-files}
+      S3_REGION: ${MINIO_REGION:-us-east-1}
+      STORAGE_URL: ${STORAGE_URL:?STORAGE_URL is required}
+      DATA_DIR: /data
+    volumes:
+      - server-data:/data
+    ports:
+      # Published on the host so you can smoke-test it side-by-side with
+      # the Node backend (which keeps :3333 inside the docker network).
+      - "${SERVER_GO_PORT:-3334}:3333"
+    healthcheck:
+      test: ["CMD", "/palmr-server", "-healthcheck"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - palmr
+
+  # ---------------------------------------------------------------------------
   # Frontend (Next.js standalone). Static UI + SSR for the share/embed
   # routes. API calls from the browser go to `/api/*` on the same origin and
   # are routed by Traefik directly to palmr-server (used to be proxied

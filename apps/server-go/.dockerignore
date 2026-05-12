@@ -1,0 +1,12 @@
+# Don't ship test/build artifacts into the build context.
+.git
+.idea
+.vscode
+*.test
+*.out
+*.log
+
+# Local go cache (we use the builder image's own cache).
+.cache/
+bin/
+dist/

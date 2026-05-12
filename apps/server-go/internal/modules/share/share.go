@@ -54,22 +54,25 @@ type ShareSecurity struct {
 }
 
 type FileSummary struct {
-	ID         string  `json:"id"`
-	Name       string  `json:"name"`
-	Extension  string  `json:"extension"`
-	Size       int64   `json:"size"`
-	ObjectName string  `json:"objectName"`
-	FolderID   *string `json:"folderId"`
-	CreatedAt  string  `json:"createdAt"`
-	UpdatedAt  string  `json:"updatedAt"`
+	ID          string            `json:"id"`
+	Name        string            `json:"name"`
+	Description *string           `json:"description"`
+	Extension   string            `json:"extension"`
+	Size        dbtypes.BigIntStr `json:"size"`
+	ObjectName  string            `json:"objectName"`
+	UserID      string            `json:"userId"`
+	FolderID    *string           `json:"folderId"`
+	CreatedAt   string            `json:"createdAt"`
+	UpdatedAt   string            `json:"updatedAt"`
 }
 
 type FolderSummary struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	ParentID  *string `json:"parentId"`
-	CreatedAt string `json:"createdAt"`
-	UpdatedAt string `json:"updatedAt"`
+	ID          string  `json:"id"`
+	Name        string  `json:"name"`
+	Description *string `json:"description"`
+	ParentID    *string `json:"parentId"`
+	CreatedAt   string  `json:"createdAt"`
+	UpdatedAt   string  `json:"updatedAt"`
 }
 
 type Handler struct {
@@ -270,11 +273,13 @@ func (h *Handler) Get(ctx context.Context, in *ShareGetInput) (*ShareGetOutput, 
 
 type ShareUpdateInput struct {
 	Body struct {
-		ID          string  `json:"id" required:"true"`
-		Name        *string `json:"name,omitempty"`
-		Description *string `json:"description,omitempty"`
-		Expiration  *string `json:"expiration,omitempty" format:"date-time"`
-		MaxViews    *int    `json:"maxViews,omitempty"`
+		ID          string   `json:"id" required:"true"`
+		Name        *string  `json:"name,omitempty"`
+		Description *string  `json:"description,omitempty"`
+		Expiration  *string  `json:"expiration,omitempty" format:"date-time"`
+		MaxViews    *int     `json:"maxViews,omitempty"`
+		Password    *string  `json:"password,omitempty"`
+		Recipients  []string `json:"recipients,omitempty"`
 	}
 }
 
@@ -315,6 +320,35 @@ func (h *Handler) Update(ctx context.Context, in *ShareUpdateInput) (*ShareGetOu
 			`UPDATE share_security SET maxViews = ?, updatedAt = CURRENT_TIMESTAMP WHERE id = (SELECT securityId FROM shares WHERE id = ?)`,
 			*in.Body.MaxViews, in.Body.ID); err != nil {
 			return nil, apperr.Internal("update maxViews")
+		}
+	}
+	if in.Body.Password != nil {
+		var hashed *string
+		if *in.Body.Password != "" {
+			hp, err := auth.HashPassword(*in.Body.Password, 12)
+			if err != nil {
+				return nil, apperr.BadRequest(err.Error())
+			}
+			hashed = &hp
+		}
+		if _, err := h.DB.ExecContext(ctx,
+			`UPDATE share_security SET password = ?, updatedAt = CURRENT_TIMESTAMP WHERE id = (SELECT securityId FROM shares WHERE id = ?)`,
+			hashed, in.Body.ID); err != nil {
+			return nil, apperr.Internal("update password")
+		}
+	}
+	if in.Body.Recipients != nil {
+		// Full replacement: wipe and re-add. Cheaper than diffing for a list typically <50 entries.
+		_, _ = h.DB.ExecContext(ctx, `DELETE FROM share_recipients WHERE shareId = ?`, in.Body.ID)
+		now := time.Now().UTC()
+		for _, e := range in.Body.Recipients {
+			e = strings.TrimSpace(strings.ToLower(e))
+			if e == "" {
+				continue
+			}
+			_, _ = h.DB.ExecContext(ctx,
+				`INSERT INTO share_recipients (id, email, shareId, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?)`,
+				uuid.NewString(), e, in.Body.ID, now, now)
 		}
 	}
 	v, _ := h.fullView(ctx, in.Body.ID)
@@ -594,13 +628,18 @@ type securityView struct {
 }
 
 type recipientView struct {
-	ID    string `json:"id"`
-	Email string `json:"email"`
+	ID        string `json:"id"`
+	Email     string `json:"email"`
+	CreatedAt string `json:"createdAt"`
+	UpdatedAt string `json:"updatedAt"`
 }
 
 type aliasView struct {
-	Alias   string `json:"alias"`
-	ShareID string `json:"shareId"`
+	ID        string `json:"id"`
+	Alias     string `json:"alias"`
+	ShareID   string `json:"shareId"`
+	CreatedAt string `json:"createdAt"`
+	UpdatedAt string `json:"updatedAt"`
 }
 
 type ByAliasInput struct {
@@ -714,11 +753,15 @@ func (h *Handler) fullView(ctx context.Context, shareID string) (publicView, err
 	_ = h.DB.GetContext(ctx, &creator, `SELECT creatorId FROM shares WHERE id = ?`, shareID)
 	v.CreatorID = creator
 
-	rows, _ := h.DB.QueryxContext(ctx, `SELECT id, email FROM share_recipients WHERE shareId = ?`, shareID)
+	rows, _ := h.DB.QueryxContext(ctx,
+		`SELECT id, email, createdAt, updatedAt FROM share_recipients WHERE shareId = ?`, shareID)
 	defer rows.Close()
 	for rows.Next() {
 		var r recipientView
-		_ = rows.Scan(&r.ID, &r.Email)
+		var created, updated dbtypes.PrismaTime
+		_ = rows.Scan(&r.ID, &r.Email, &created, &updated)
+		r.CreatedAt = created.Time.Format(time.RFC3339)
+		r.UpdatedAt = updated.Time.Format(time.RFC3339)
 		v.Recipients = append(v.Recipients, r)
 	}
 	return v, nil
@@ -749,36 +792,40 @@ func (h *Handler) publicView(ctx context.Context, shareID string) (publicView, e
 
 	// Files via M2M
 	rowsF, _ := h.DB.QueryxContext(ctx, `
-		SELECT f.id, f.name, f.extension, f.size, f.objectName, f.folderId, f.createdAt, f.updatedAt
+		SELECT f.id, f.name, f.description, f.extension, f.size, f.objectName, f.userId, f.folderId, f.createdAt, f.updatedAt
 		FROM files f JOIN _ShareFiles sf ON sf.A = f.id WHERE sf.B = ?`, shareID)
 	defer rowsF.Close()
 	for rowsF.Next() {
 		var fs FileSummary
-		var created, updated time.Time
-		_ = rowsF.Scan(&fs.ID, &fs.Name, &fs.Extension, &fs.Size, &fs.ObjectName, &fs.FolderID, &created, &updated)
-		fs.CreatedAt = created.Format(time.RFC3339)
-		fs.UpdatedAt = updated.Format(time.RFC3339)
+		var created, updated dbtypes.PrismaTime
+		_ = rowsF.Scan(&fs.ID, &fs.Name, &fs.Description, &fs.Extension, &fs.Size, &fs.ObjectName, &fs.UserID, &fs.FolderID, &created, &updated)
+		fs.CreatedAt = created.Time.Format(time.RFC3339)
+		fs.UpdatedAt = updated.Time.Format(time.RFC3339)
 		v.Files = append(v.Files, fs)
 	}
 
 	// Folders via M2M
 	rowsG, _ := h.DB.QueryxContext(ctx, `
-		SELECT f.id, f.name, f.parentId, f.createdAt, f.updatedAt
+		SELECT f.id, f.name, f.description, f.parentId, f.createdAt, f.updatedAt
 		FROM folders f JOIN _ShareFolders sf ON sf.A = f.id WHERE sf.B = ?`, shareID)
 	defer rowsG.Close()
 	for rowsG.Next() {
 		var fs FolderSummary
-		var created, updated time.Time
-		_ = rowsG.Scan(&fs.ID, &fs.Name, &fs.ParentID, &created, &updated)
-		fs.CreatedAt = created.Format(time.RFC3339)
-		fs.UpdatedAt = updated.Format(time.RFC3339)
+		var created, updated dbtypes.PrismaTime
+		_ = rowsG.Scan(&fs.ID, &fs.Name, &fs.Description, &fs.ParentID, &created, &updated)
+		fs.CreatedAt = created.Time.Format(time.RFC3339)
+		fs.UpdatedAt = updated.Time.Format(time.RFC3339)
 		v.Folders = append(v.Folders, fs)
 	}
 
 	// alias
-	row := h.DB.QueryRowContext(ctx, `SELECT alias, shareId FROM share_aliases WHERE shareId = ?`, shareID)
+	row := h.DB.QueryRowContext(ctx,
+		`SELECT id, alias, shareId, createdAt, updatedAt FROM share_aliases WHERE shareId = ?`, shareID)
 	var av aliasView
-	if err := row.Scan(&av.Alias, &av.ShareID); err == nil {
+	var aliasCreated, aliasUpdated dbtypes.PrismaTime
+	if err := row.Scan(&av.ID, &av.Alias, &av.ShareID, &aliasCreated, &aliasUpdated); err == nil {
+		av.CreatedAt = aliasCreated.Time.Format(time.RFC3339)
+		av.UpdatedAt = aliasUpdated.Time.Format(time.RFC3339)
 		v.Alias = &av
 	}
 	return v, nil

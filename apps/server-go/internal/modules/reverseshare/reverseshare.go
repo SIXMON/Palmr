@@ -50,19 +50,55 @@ import (
 	"github.com/sixmon/palmr/apps/server-go/internal/storage"
 )
 
+// ReverseShare mirrors the reverse_shares row 1:1.
 type ReverseShare struct {
-	ID               string     `db:"id"               json:"id"`
-	Name             *string    `db:"name"             json:"name"`
-	Description      *string    `db:"description"      json:"description"`
-	Expiration       *dbtypes.PrismaTime `db:"expiration"       json:"expiration"`
-	MaxFiles         *int       `db:"maxFiles"         json:"maxFiles"`
-	MaxFileSize      *int64     `db:"maxFileSize"      json:"maxFileSize"`
-	AllowedFileTypes *string    `db:"allowedFileTypes" json:"allowedFileTypes"`
-	Password         *string    `db:"password"         json:"-"`
-	IsActive         bool       `db:"isActive"         json:"isActive"`
-	CreatorID        string     `db:"creatorId"        json:"creatorId"`
-	CreatedAt        dbtypes.PrismaTime  `db:"createdAt"        json:"createdAt"`
-	UpdatedAt        dbtypes.PrismaTime  `db:"updatedAt"        json:"updatedAt"`
+	ID                 string              `db:"id"                 json:"id"`
+	Name               *string             `db:"name"               json:"name"`
+	Description        *string             `db:"description"        json:"description"`
+	Expiration         *dbtypes.PrismaTime `db:"expiration"         json:"expiration"`
+	MaxFiles           *int                `db:"maxFiles"           json:"maxFiles"`
+	MaxFileSize        *int64              `db:"maxFileSize"        json:"maxFileSize"`
+	AllowedFileTypes   *string             `db:"allowedFileTypes"   json:"allowedFileTypes"`
+	Password           *string             `db:"password"           json:"-"`
+	PageLayout         string              `db:"pageLayout"         json:"pageLayout"`
+	IsActive           bool                `db:"isActive"           json:"isActive"`
+	NameFieldRequired  string              `db:"nameFieldRequired"  json:"nameFieldRequired"`
+	EmailFieldRequired string              `db:"emailFieldRequired" json:"emailFieldRequired"`
+	CreatorID          string              `db:"creatorId"          json:"creatorId"`
+	CreatedAt          dbtypes.PrismaTime  `db:"createdAt"          json:"createdAt"`
+	UpdatedAt          dbtypes.PrismaTime  `db:"updatedAt"          json:"updatedAt"`
+}
+
+// ReverseShareFile mirrors reverse_share_files row 1:1.
+type ReverseShareFile struct {
+	ID            string             `db:"id"            json:"id"`
+	Name          string             `db:"name"          json:"name"`
+	Description   *string            `db:"description"   json:"description"`
+	Extension     string             `db:"extension"     json:"extension"`
+	Size          dbtypes.BigIntStr  `db:"size"          json:"size"`
+	ObjectName    string             `db:"objectName"    json:"objectName"`
+	UploaderEmail *string            `db:"uploaderEmail" json:"uploaderEmail"`
+	UploaderName  *string            `db:"uploaderName"  json:"uploaderName"`
+	CreatedAt     dbtypes.PrismaTime `db:"createdAt"     json:"createdAt"`
+	UpdatedAt     dbtypes.PrismaTime `db:"updatedAt"     json:"updatedAt"`
+}
+
+// ReverseShareAlias mirrors reverse_share_aliases row 1:1.
+type ReverseShareAlias struct {
+	ID             string             `db:"id"             json:"id"`
+	Alias          string             `db:"alias"          json:"alias"`
+	ReverseShareID string             `db:"reverseShareId" json:"reverseShareId"`
+	CreatedAt      dbtypes.PrismaTime `db:"createdAt"      json:"createdAt"`
+	UpdatedAt      dbtypes.PrismaTime `db:"updatedAt"      json:"updatedAt"`
+}
+
+// ReverseShareWithRel is what the admin UI consumes: the row plus its
+// alias and uploaded files, plus a synthesized hasPassword flag.
+type ReverseShareWithRel struct {
+	ReverseShare
+	HasPassword bool               `json:"hasPassword"`
+	Files       []ReverseShareFile `json:"files"`
+	Alias       *ReverseShareAlias `json:"alias"`
 }
 
 type Handler struct {
@@ -121,11 +157,23 @@ type RSCreateInput struct {
 		MaxFileSize      *int64  `json:"maxFileSize,omitempty"`
 		AllowedFileTypes *string `json:"allowedFileTypes,omitempty"`
 		Password         *string `json:"password,omitempty"`
+		// UI form fields. Persisted as-is on the reverse_shares row.
+		PageLayout         *string `json:"pageLayout,omitempty"`
+		NameFieldRequired  *string `json:"nameFieldRequired,omitempty"`
+		EmailFieldRequired *string `json:"emailFieldRequired,omitempty"`
 	}
 }
 
-type RSSingleOutput struct{ Body struct{ ReverseShare ReverseShare `json:"reverseShare"` } }
-type RSListOutput struct{ Body struct{ ReverseShares []ReverseShare `json:"reverseShares"` } }
+type RSSingleOutput struct {
+	Body struct {
+		ReverseShare ReverseShareWithRel `json:"reverseShare"`
+	}
+}
+type RSListOutput struct {
+	Body struct {
+		ReverseShares []ReverseShareWithRel `json:"reverseShares"`
+	}
+}
 type RSMsgOutput struct{ Body struct{ Message string `json:"message"` } }
 
 func (h *Handler) Create(ctx context.Context, in *RSCreateInput) (*RSSingleOutput, error) {
@@ -149,15 +197,18 @@ func (h *Handler) Create(ctx context.Context, in *RSCreateInput) (*RSSingleOutpu
 			exp = &t
 		}
 	}
+	pageLayout := stringOr(in.Body.PageLayout, "DEFAULT")
+	nameReq := stringOr(in.Body.NameFieldRequired, "OPTIONAL")
+	emailReq := stringOr(in.Body.EmailFieldRequired, "OPTIONAL")
 	_, err = h.DB.ExecContext(ctx, `
 		INSERT INTO reverse_shares (id, name, description, expiration, maxFiles, maxFileSize, allowedFileTypes, password, pageLayout, isActive, nameFieldRequired, emailFieldRequired, createdAt, updatedAt, creatorId)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'DEFAULT', 1, 'OPTIONAL', 'OPTIONAL', ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`,
 		id, in.Body.Name, in.Body.Description, exp, in.Body.MaxFiles, in.Body.MaxFileSize, in.Body.AllowedFileTypes,
-		hashedPwd, now, now, uc.UserID)
+		hashedPwd, pageLayout, nameReq, emailReq, now, now, uc.UserID)
 	if err != nil {
 		return nil, apperr.Internal("create reverse-share: " + err.Error())
 	}
-	rs, _ := h.load(ctx, id)
+	rs, _ := h.loadWithRel(ctx, id)
 	out := &RSSingleOutput{}
 	out.Body.ReverseShare = rs
 	return out, nil
@@ -169,9 +220,20 @@ func (h *Handler) List(ctx context.Context, _ *struct{}) (*RSListOutput, error) 
 		return nil, apperr.Unauthorized(err.Error())
 	}
 	out := &RSListOutput{}
-	_ = h.DB.SelectContext(ctx, &out.Body.ReverseShares,
-		`SELECT id, name, description, expiration, maxFiles, maxFileSize, allowedFileTypes, password, isActive, creatorId, createdAt, updatedAt
-		 FROM reverse_shares WHERE creatorId = ? ORDER BY createdAt DESC`, uc.UserID)
+	// Two-step: fetch ids first, then loadWithRel each. Cheaper than a
+	// hand-written join for the typical "tens of reverse-shares" case.
+	var ids []string
+	if err := h.DB.SelectContext(ctx, &ids,
+		`SELECT id FROM reverse_shares WHERE creatorId = ? ORDER BY createdAt DESC`, uc.UserID); err != nil {
+		return out, nil
+	}
+	out.Body.ReverseShares = make([]ReverseShareWithRel, 0, len(ids))
+	for _, id := range ids {
+		v, err := h.loadWithRel(ctx, id)
+		if err == nil {
+			out.Body.ReverseShares = append(out.Body.ReverseShares, v)
+		}
+	}
 	return out, nil
 }
 
@@ -182,7 +244,7 @@ func (h *Handler) Get(ctx context.Context, in *RSGetInput) (*RSSingleOutput, err
 	if err != nil {
 		return nil, apperr.Unauthorized(err.Error())
 	}
-	rs, err := h.load(ctx, in.ID)
+	rs, err := h.loadWithRel(ctx, in.ID)
 	if err != nil || rs.CreatorID != uc.UserID {
 		return nil, apperr.NotFound("reverse share not found")
 	}
@@ -193,13 +255,18 @@ func (h *Handler) Get(ctx context.Context, in *RSGetInput) (*RSSingleOutput, err
 
 type RSUpdateInput struct {
 	Body struct {
-		ID               string  `json:"id" required:"true"`
-		Name             *string `json:"name,omitempty"`
-		Description      *string `json:"description,omitempty"`
-		Expiration       *string `json:"expiration,omitempty" format:"date-time"`
-		MaxFiles         *int    `json:"maxFiles,omitempty"`
-		MaxFileSize      *int64  `json:"maxFileSize,omitempty"`
-		AllowedFileTypes *string `json:"allowedFileTypes,omitempty"`
+		ID                 string  `json:"id" required:"true"`
+		Name               *string `json:"name,omitempty"`
+		Description        *string `json:"description,omitempty"`
+		Expiration         *string `json:"expiration,omitempty" format:"date-time"`
+		MaxFiles           *int    `json:"maxFiles,omitempty"`
+		MaxFileSize        *int64  `json:"maxFileSize,omitempty"`
+		AllowedFileTypes   *string `json:"allowedFileTypes,omitempty"`
+		Password           *string `json:"password,omitempty"`
+		IsActive           *bool   `json:"isActive,omitempty"`
+		PageLayout         *string `json:"pageLayout,omitempty"`
+		NameFieldRequired  *string `json:"nameFieldRequired,omitempty"`
+		EmailFieldRequired *string `json:"emailFieldRequired,omitempty"`
 	}
 }
 
@@ -233,6 +300,34 @@ func (h *Handler) Update(ctx context.Context, in *RSUpdateInput) (*RSSingleOutpu
 		fields = append(fields, "allowedFileTypes = ?")
 		args = append(args, *in.Body.AllowedFileTypes)
 	}
+	if in.Body.IsActive != nil {
+		fields = append(fields, "isActive = ?")
+		args = append(args, *in.Body.IsActive)
+	}
+	if in.Body.PageLayout != nil {
+		fields = append(fields, "pageLayout = ?")
+		args = append(args, *in.Body.PageLayout)
+	}
+	if in.Body.NameFieldRequired != nil {
+		fields = append(fields, "nameFieldRequired = ?")
+		args = append(args, *in.Body.NameFieldRequired)
+	}
+	if in.Body.EmailFieldRequired != nil {
+		fields = append(fields, "emailFieldRequired = ?")
+		args = append(args, *in.Body.EmailFieldRequired)
+	}
+	if in.Body.Password != nil {
+		var hashed *string
+		if *in.Body.Password != "" {
+			hp, err := auth.HashPassword(*in.Body.Password, 12)
+			if err != nil {
+				return nil, apperr.BadRequest(err.Error())
+			}
+			hashed = &hp
+		}
+		fields = append(fields, "password = ?")
+		args = append(args, hashed)
+	}
 	if in.Body.Expiration != nil {
 		if t, err := time.Parse(time.RFC3339, *in.Body.Expiration); err == nil {
 			fields = append(fields, "expiration = ?")
@@ -248,7 +343,7 @@ func (h *Handler) Update(ctx context.Context, in *RSUpdateInput) (*RSSingleOutpu
 	if _, err := h.DB.ExecContext(ctx, q, args...); err != nil {
 		return nil, apperr.Internal("update reverse-share")
 	}
-	rs, _ := h.load(ctx, in.Body.ID)
+	rs, _ := h.loadWithRel(ctx, in.Body.ID)
 	out := &RSSingleOutput{}
 	out.Body.ReverseShare = rs
 	return out, nil
@@ -285,7 +380,7 @@ func (h *Handler) setActive(ctx context.Context, id string, active bool) (*RSSin
 		return nil, err
 	}
 	_, _ = h.DB.ExecContext(ctx, `UPDATE reverse_shares SET isActive = ?, updatedAt = CURRENT_TIMESTAMP WHERE id = ?`, active, id)
-	rs, _ := h.load(ctx, id)
+	rs, _ := h.loadWithRel(ctx, id)
 	out := &RSSingleOutput{}
 	out.Body.ReverseShare = rs
 	return out, nil
@@ -318,7 +413,7 @@ func (h *Handler) SetPassword(ctx context.Context, in *RSPasswordInput) (*RSSing
 	if err != nil {
 		return nil, apperr.Internal("set password")
 	}
-	rs, _ := h.load(ctx, in.ID)
+	rs, _ := h.loadWithRel(ctx, in.ID)
 	out := &RSSingleOutput{}
 	out.Body.ReverseShare = rs
 	return out, nil
@@ -922,13 +1017,39 @@ func (h *Handler) UpdateFile(ctx context.Context, in *UpdateFileInput) (*RSMsgOu
 func (h *Handler) load(ctx context.Context, id string) (ReverseShare, error) {
 	var rs ReverseShare
 	err := h.DB.GetContext(ctx, &rs, `
-		SELECT id, name, description, expiration, maxFiles, maxFileSize, allowedFileTypes, password, isActive, creatorId, createdAt, updatedAt
+		SELECT id, name, description, expiration, maxFiles, maxFileSize, allowedFileTypes, password,
+		       pageLayout, isActive, nameFieldRequired, emailFieldRequired, creatorId, createdAt, updatedAt
 		FROM reverse_shares WHERE id = ?`, id)
 	return rs, err
 }
 
 func (h *Handler) loadIncludingPassword(ctx context.Context, id string) (ReverseShare, error) {
 	return h.load(ctx, id)
+}
+
+// loadWithRel returns the row plus its alias + uploaded files, which is
+// what the admin UI consumes (ReverseShareWithAlias on the TS side).
+func (h *Handler) loadWithRel(ctx context.Context, id string) (ReverseShareWithRel, error) {
+	rs, err := h.load(ctx, id)
+	if err != nil {
+		return ReverseShareWithRel{}, err
+	}
+	out := ReverseShareWithRel{
+		ReverseShare: rs,
+		HasPassword:  rs.Password != nil && *rs.Password != "",
+	}
+	// Files for this reverse-share
+	_ = h.DB.SelectContext(ctx, &out.Files, `
+		SELECT id, name, description, extension, size, objectName, uploaderEmail, uploaderName, createdAt, updatedAt
+		FROM reverse_share_files WHERE reverseShareId = ? ORDER BY createdAt ASC`, id)
+	// Optional alias
+	var a ReverseShareAlias
+	if err := h.DB.GetContext(ctx, &a, `
+		SELECT id, alias, reverseShareId, createdAt, updatedAt
+		FROM reverse_share_aliases WHERE reverseShareId = ?`, id); err == nil {
+		out.Alias = &a
+	}
+	return out, nil
 }
 
 func (h *Handler) assertOwner(ctx context.Context, id, userID string) error {
@@ -990,6 +1111,14 @@ func (h *Handler) validateUpload(ctx context.Context, rs ReverseShare, password,
 		}
 	}
 	return nil
+}
+
+// stringOr returns *p when non-nil and non-empty, otherwise def.
+func stringOr(p *string, def string) string {
+	if p == nil || *p == "" {
+		return def
+	}
+	return *p
 }
 
 // -----------------------------------------------------------------------------

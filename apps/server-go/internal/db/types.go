@@ -3,6 +3,8 @@ package db
 import (
 	"database/sql/driver"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -56,3 +58,64 @@ func (t PrismaTime) Value() (driver.Value, error) {
 	}
 	return t.Time.UnixMilli(), nil
 }
+
+// BigIntStr is an int64 that serialises to/from JSON as a quoted number,
+// matching how Prisma encodes BigInt columns over the wire. Without this
+// the web client (which types these fields as `string`) would either
+// crash on `someBig.toLocaleString()` or silently lose precision for
+// files larger than 2^53 bytes.
+type BigIntStr int64
+
+func (b BigIntStr) MarshalJSON() ([]byte, error) {
+	// Always emit as a JSON string, even when zero. Matches Prisma's
+	// JSON.stringify(BigInt(n)) which produces "0", not 0.
+	return []byte(`"` + strconv.FormatInt(int64(b), 10) + `"`), nil
+}
+
+func (b *BigIntStr) UnmarshalJSON(data []byte) error {
+	s := string(data)
+	if s == "null" {
+		*b = 0
+		return nil
+	}
+	// Accept both "12345" and 12345 — the legacy frontend sometimes sends a
+	// number for newly-uploaded files, so be liberal.
+	s = strings.Trim(s, `"`)
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return fmt.Errorf("BigIntStr: cannot parse %q: %w", string(data), err)
+	}
+	*b = BigIntStr(n)
+	return nil
+}
+
+// Scan implements sql.Scanner so sqlx can read the value from a BIGINT
+// column straight into BigIntStr.
+func (b *BigIntStr) Scan(src any) error {
+	switch v := src.(type) {
+	case nil:
+		*b = 0
+	case int64:
+		*b = BigIntStr(v)
+	case int:
+		*b = BigIntStr(int64(v))
+	case []byte:
+		n, err := strconv.ParseInt(string(v), 10, 64)
+		if err != nil {
+			return err
+		}
+		*b = BigIntStr(n)
+	case string:
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return err
+		}
+		*b = BigIntStr(n)
+	default:
+		return fmt.Errorf("BigIntStr: unsupported scan type %T", src)
+	}
+	return nil
+}
+
+// Value implements driver.Valuer for INSERTs/UPDATEs.
+func (b BigIntStr) Value() (driver.Value, error) { return int64(b), nil }

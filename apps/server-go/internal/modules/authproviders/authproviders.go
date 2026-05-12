@@ -185,12 +185,12 @@ func (h *Handler) Update(ctx context.Context, in *APUpdateInput) (*APSingleOutpu
 }
 
 type APReorderEntry struct {
-	ID    string `json:"id"`
-	Order int    `json:"order"`
+	ID        string `json:"id"`
+	SortOrder int    `json:"sortOrder"`
 }
 type APReorderInput struct {
 	Body struct {
-		Order []APReorderEntry `json:"order"`
+		Providers []APReorderEntry `json:"providers"`
 	}
 }
 type APMsgOutput struct{ Body struct{ Message string `json:"message"` } }
@@ -204,8 +204,8 @@ func (h *Handler) Reorder(ctx context.Context, in *APReorderInput) (*APMsgOutput
 		return nil, apperr.Internal("begin")
 	}
 	defer tx.Rollback()
-	for _, p := range in.Body.Order {
-		_, _ = tx.ExecContext(ctx, `UPDATE auth_providers SET sortOrder=? WHERE id=?`, p.Order, p.ID)
+	for _, p := range in.Body.Providers {
+		_, _ = tx.ExecContext(ctx, `UPDATE auth_providers SET sortOrder=? WHERE id=?`, p.SortOrder, p.ID)
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, apperr.Internal("commit")
@@ -237,7 +237,7 @@ func (h *Handler) Authorize(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "provider")
 	p, err := h.loadByName(r.Context(), name)
 	if err != nil || !p.Enabled {
-		http.Error(w, "provider not found or disabled", http.StatusNotFound)
+		apperr.WriteJSON(w, http.StatusNotFound, "provider not found or disabled")
 		return
 	}
 	verifier, challenge := pkcePair()
@@ -261,21 +261,21 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 
 	st, ok := h.state[stateID]
 	if !ok || st.Provider != name {
-		http.Error(w, "invalid state", http.StatusBadRequest)
+		apperr.WriteJSON(w, http.StatusBadRequest, "invalid state")
 		return
 	}
 	delete(h.state, stateID)
 
 	p, err := h.loadByName(r.Context(), name)
 	if err != nil || !p.Enabled {
-		http.Error(w, "provider not found", http.StatusNotFound)
+		apperr.WriteJSON(w, http.StatusNotFound, "provider not found")
 		return
 	}
 
 	conf, ctx := h.oauth2Config(r.Context(), p)
 	tok, err := conf.Exchange(ctx, code, oauth2.SetAuthURLParam("code_verifier", st.CodeVerifier))
 	if err != nil {
-		http.Error(w, "token exchange: "+err.Error(), http.StatusBadGateway)
+		apperr.WriteJSON(w, http.StatusBadGateway, "token exchange: "+err.Error())
 		return
 	}
 
@@ -283,24 +283,24 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 	// otherwise we hit userInfoEndpoint directly.
 	email, sub, err := h.fetchIdentity(ctx, p, tok)
 	if err != nil {
-		http.Error(w, "userinfo: "+err.Error(), http.StatusBadGateway)
+		apperr.WriteJSON(w, http.StatusBadGateway, "userinfo: "+err.Error())
 		return
 	}
 	if email == "" || sub == "" {
-		http.Error(w, "missing claims", http.StatusBadGateway)
+		apperr.WriteJSON(w, http.StatusBadGateway, "missing claims")
 		return
 	}
 
 	// Link or create user.
 	userID, isAdmin, err := h.linkOrCreate(r.Context(), p, email, sub)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		apperr.WriteJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	jwtStr, err := h.Signer.Sign(userID, isAdmin)
 	if err != nil {
-		http.Error(w, "issue token: "+err.Error(), http.StatusInternalServerError)
+		apperr.WriteJSON(w, http.StatusInternalServerError, "issue token: "+err.Error())
 		return
 	}
 	cookies.Set(w, jwtStr, cookies.Options{Secure: h.SecureSite, MaxAge: h.CookieTTL})

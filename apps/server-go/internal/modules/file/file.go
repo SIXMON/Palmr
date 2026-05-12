@@ -44,7 +44,7 @@ type File struct {
 	Name        string    `db:"name"        json:"name"`
 	Description *string   `db:"description" json:"description"`
 	Extension   string    `db:"extension"   json:"extension"`
-	Size        int64     `db:"size"        json:"size"`
+	Size        dbtypes.BigIntStr `db:"size"        json:"size"`
 	ObjectName  string    `db:"objectName"  json:"objectName"`
 	UserID      string    `db:"userId"      json:"userId"`
 	FolderID    *string   `db:"folderId"    json:"folderId"`
@@ -169,10 +169,19 @@ func (h *Handler) RegisterFile(ctx context.Context, in *FileRegisterInput) (*Fil
 // in the user's root folder, so the UI can warn before upload.
 // -----------------------------------------------------------------------------
 
+// FileCheckInput mirrors the legacy `CheckFileSchema` exactly so the
+// frontend can reuse its full upload payload (it sends size/objectName
+// for both /files/check and /files). The extra fields are accepted
+// here but only Name+Extension are actually used by the duplicate
+// check below.
 type FileCheckInput struct {
 	Body struct {
-		Name      string `json:"name" required:"true"`
-		Extension string `json:"extension" required:"true"`
+		Name        string  `json:"name" required:"true"`
+		Description *string `json:"description,omitempty"`
+		Extension   string  `json:"extension" required:"true"`
+		Size        *int64  `json:"size,omitempty"`
+		ObjectName  *string `json:"objectName,omitempty"`
+		FolderID    *string `json:"folderId,omitempty"`
 	}
 }
 type FileCheckOutput struct {

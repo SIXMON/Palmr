@@ -49,7 +49,11 @@ type FolderCreateInput struct {
 	Body struct {
 		Name        string  `json:"name" required:"true"`
 		Description *string `json:"description,omitempty"`
-		ParentID    *string `json:"parentId,omitempty"`
+		// objectName is sent by the frontend (FolderOperationRequest) but
+		// the Go backend generates the value server-side. Accept it so
+		// the body validates; we ignore the client value.
+		ObjectName *string `json:"objectName,omitempty"`
+		ParentID   *string `json:"parentId,omitempty"`
 	}
 }
 type FolderSingleOutput struct {
@@ -105,9 +109,15 @@ func (h *Handler) List(ctx context.Context, _ *FolderListInput) (*FolderListOutp
 
 // -----------------------------------------------------------------------------
 
+// FolderCheckInput mirrors the legacy `CheckFolderSchema` so the
+// frontend can reuse its full create payload (it sends objectName and
+// parentId for both /folders/check and /folders).
 type FolderCheckInput struct {
 	Body struct {
-		Name string `json:"name" required:"true"`
+		Name        string  `json:"name" required:"true"`
+		Description *string `json:"description,omitempty"`
+		ObjectName  *string `json:"objectName,omitempty"`
+		ParentID    *string `json:"parentId,omitempty"`
 	}
 }
 type FolderCheckOutput struct {

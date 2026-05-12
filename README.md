@@ -1,9 +1,4 @@
 
-> ## ⚠️ Project Archived
-> After deep reflection, I have decided to focus my limited time and energy on my other projects. As a solo developer, I have struggled to actively maintain multiple projects with the care and attention they deserve. Without enough sponsors, it became unfeasible to maintain Palmr.
-> If you are interested in continuing this work through a fork, I will be happy to add a link to it here in the README.
-> We thank all the contributors and users who have supported Palmr over time!
-
 
 # 🌴 Palmr. - Open-Source File Transfer
 

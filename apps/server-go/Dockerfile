@@ -42,18 +42,27 @@ RUN CGO_ENABLED=0 GOOS=linux \
       -o /out/palmr-server \
       ./cmd/server
 
-# ----- stage 2: collect a CA bundle and a passwd entry ----------------------
-# `FROM scratch` has no /etc/passwd. We mint a single-line one here so the
-# binary can run as a non-root UID and Go's user.Current() still works.
+# ----- stage 2: collect a CA bundle, a passwd entry, and a prepared /data
+# directory. `FROM scratch` has no shell, so we can't `mkdir` at boot —
+# we ship the directory pre-owned by UID 1001 instead.
 FROM alpine:3.20 AS tools
 RUN apk add --no-cache ca-certificates
 RUN echo "palmr:x:1001:1001::/data:/sbin/nologin" > /tmp/passwd
+# Create /tmp/data/{prisma,uploads,temp-uploads} owned by 1001:1001 so the
+# COPY into scratch carries those permissions. A fresh Docker named
+# volume mounted at /data will inherit the 1001:1001 ownership on first
+# mount (Docker copies the existing directory contents + perms into a
+# brand-new volume), which is the only way to write inside a scratch
+# image running as a non-root user.
+RUN mkdir -p /tmp/data/prisma /tmp/data/uploads /tmp/data/temp-uploads \
+    && chown -R 1001:1001 /tmp/data
 
 # ----- stage 3: final image, FROM scratch -----------------------------------
 FROM scratch
 
 COPY --from=tools  /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=tools  /tmp/passwd                        /etc/passwd
+COPY --from=tools  --chown=1001:1001 /tmp/data        /data
 COPY --from=builder /out/palmr-server                 /palmr-server
 
 # Seed JSON files (configs.json, providers.json) — the Go entrypoint copies

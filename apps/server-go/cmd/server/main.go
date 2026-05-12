@@ -85,6 +85,11 @@ func run() error {
 	if err := conn.PingContext(ctx); err != nil {
 		return fmt.Errorf("db ping: %w", err)
 	}
+	// First-boot: create schema and seed app_configs if the DB is empty.
+	// Idempotent on populated DBs.
+	if err := db.EnsureSchema(ctx, conn, cfg.DataDir); err != nil {
+		return fmt.Errorf("ensure schema: %w", err)
+	}
 
 	s3client, err := storage.New(ctx, cfg)
 	if err != nil {

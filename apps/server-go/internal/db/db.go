@@ -13,6 +13,7 @@ package db
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -24,6 +25,13 @@ import (
 // palmr.db file under dataDir. Caller owns Close.
 func Open(ctx context.Context, dataDir string) (*sqlx.DB, error) {
 	path := filepath.Join(dataDir, "prisma", "palmr.db")
+
+	// modernc.org/sqlite refuses with "out of memory (14)" / SQLITE_CANTOPEN
+	// when the parent directory doesn't exist. Create it up-front so the
+	// first boot doesn't need a pre-baked volume.
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, fmt.Errorf("mkdir %s: %w", filepath.Dir(path), err)
+	}
 
 	// modernc/sqlite uses the URI form. Flags chosen to match the
 	// behaviour of the Prisma client:

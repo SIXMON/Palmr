@@ -209,8 +209,6 @@ services:
     build:
       context: ./apps/server-go
       dockerfile: Dockerfile
-      platforms:
-        - linux/amd64
     image: ghcr.io/sixmon/palmr-server-go:dev
     container_name: palmr-server-go
     restart: unless-stopped

@@ -41,7 +41,7 @@ http:
     palmr-server:
       loadBalancer:
         servers:
-          - url: "http://palmr-server:3333"
+          - url: "http://palmr-server-go:3333"
         # Disable Traefik's response buffering so SSE / large streaming
         # downloads aren't held in memory.
         passHostHeader: true

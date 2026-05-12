@@ -62,10 +62,12 @@ func RegisterPublic(api huma.API, h *Handler) {
 // POST /auth/login
 // -----------------------------------------------------------------------------
 
+// LoginInput matches the legacy Fastify schema 1:1 so the web client
+// keeps working unchanged: { emailOrUsername, password }.
 type LoginInput struct {
 	Body struct {
-		Login    string `json:"login" required:"true"` // username OR email
-		Password string `json:"password" required:"true"`
+		EmailOrUsername string `json:"emailOrUsername" required:"true" minLength:"1"`
+		Password        string `json:"password" required:"true"`
 	}
 }
 
@@ -88,7 +90,7 @@ type publicUser struct {
 }
 
 func (h *Handler) Login(ctx context.Context, in *LoginInput) (*LoginOutput, error) {
-	login := strings.TrimSpace(strings.ToLower(in.Body.Login))
+	login := strings.TrimSpace(strings.ToLower(in.Body.EmailOrUsername))
 	if login == "" || in.Body.Password == "" {
 		return nil, apperr.BadRequest("login and password are required")
 	}

@@ -195,6 +195,14 @@ export class AuthProvidersService {
     userInfo.lastName = this.extractField(rawUserInfo, mappings.lastName);
     userInfo.avatar = this.extractField(rawUserInfo, mappings.avatar);
 
+    // OIDC standard "email_verified" claim — also try the snake_case key directly.
+    const verifiedRaw = rawUserInfo?.email_verified ?? rawUserInfo?.emailVerified ?? rawUserInfo?.verified_email;
+    if (typeof verifiedRaw === "boolean") {
+      userInfo.emailVerified = verifiedRaw;
+    } else if (typeof verifiedRaw === "string") {
+      userInfo.emailVerified = verifiedRaw === "true";
+    }
+
     return userInfo;
   }
 
@@ -378,6 +386,25 @@ export class AuthProvidersService {
     return `${baseUrl}/api/auth/providers/${provider.name}/authorize`;
   }
 
+  /**
+   * Restricts the post-login redirect to the application baseUrl.
+   * The client may suggest a path, but we ignore anything that isn't a
+   * path on our own host — preventing open-redirect / token theft.
+   */
+  private sanitizePostLoginRedirect(baseUrl: string, raw: string | undefined): string {
+    if (!raw) return `${baseUrl}/dashboard`;
+    try {
+      const candidate = new URL(raw, baseUrl);
+      const base = new URL(baseUrl);
+      if (candidate.origin === base.origin) {
+        return candidate.toString();
+      }
+    } catch {
+      // fallthrough
+    }
+    return `${baseUrl}/dashboard`;
+  }
+
   async getAuthorizationUrl(
     providerName: string,
     state?: string,
@@ -394,15 +421,14 @@ export class AuthProvidersService {
 
     const finalState = state || this.generateState();
     const baseUrl = this.buildBaseUrl(requestContext);
-    const callbackUrl = redirectUri || `${baseUrl}/api/auth/providers/${providerName}/callback`;
+    // CRITICAL (C6): never let a client-supplied redirect_uri reach the IdP
+    // as our registered callback. Always force our own callback URL.
+    const callbackUrl = `${baseUrl}/api/auth/providers/${providerName}/callback`;
+    const postLoginRedirect = this.sanitizePostLoginRedirect(baseUrl, redirectUri);
 
     const { codeVerifier, codeChallenge } = this.setupPkceIfNeeded(validatedProvider);
 
-    const pendingState = this.createPendingState(
-      validatedProvider.id,
-      codeVerifier || "",
-      redirectUri || `${baseUrl}/dashboard`
-    );
+    const pendingState = this.createPendingState(validatedProvider.id, codeVerifier || "", postLoginRedirect);
     this.pendingStates.set(finalState, pendingState);
 
     const endpoints = await this.resolveEndpoints(validatedProvider, validatedConfig);
@@ -422,10 +448,18 @@ export class AuthProvidersService {
   async handleCallback(providerName: string, code: string, state: string, requestContext?: RequestContextService) {
     try {
       const pendingState = this.validateAndGetPendingState(state);
+      // CRITICAL: one-shot — delete immediately to prevent replay (C7).
+      this.pendingStates.delete(state);
 
       const provider = await this.getProviderByName(providerName);
       this.validateProvider(provider, providerName);
       const validatedProvider = provider!;
+
+      // CRITICAL: prevent cross-provider state confusion (C8) — the state must
+      // have been issued for THIS provider.
+      if (pendingState.providerId !== validatedProvider.id) {
+        throw new Error(ERROR_MESSAGES.INVALID_STATE);
+      }
 
       const config = this.getProviderConfig(validatedProvider);
       this.validateConfig(config, providerName);
@@ -455,7 +489,8 @@ export class AuthProvidersService {
     const authMethod = this.getAuthMethod(config);
 
     const baseUrl = this.buildBaseUrl(requestContext);
-    const callbackUrl = provider.redirectUri || `${baseUrl}/api/auth/providers/${provider.name}/callback`;
+    // Must match the redirect_uri sent during /authorize — always the server callback.
+    const callbackUrl = `${baseUrl}/api/auth/providers/${provider.name}/callback`;
 
     const tokens = await this.executeTokenRequest(provider, code, callbackUrl, codeVerifier, authMethod, endpoints);
     const rawUserInfo = await this.fetchUserInfo(tokens, endpoints);
@@ -598,11 +633,28 @@ export class AuthProvidersService {
 
     const existingAuthProvider = await this.findExistingAuthProvider(provider.id, String(externalId));
     if (existingAuthProvider) {
+      // CRITICAL: ensure the linked account is still active.
+      if (!existingAuthProvider.user.isActive) {
+        throw new Error("Account is inactive. Please contact an administrator.");
+      }
+      // SECURITY: do NOT issue a session if the user has 2FA enabled — the OIDC
+      // flow would otherwise bypass the second factor. The caller should detect
+      // this and redirect into the 2FA flow. For now we refuse the login.
+      if (existingAuthProvider.user.twoFactorEnabled) {
+        throw new Error("Two-factor authentication is required for this account. Please log in with password + 2FA.");
+      }
       return await this.updateExistingUserFromProvider(existingAuthProvider.user, userInfo);
     }
 
     const existingUser = await this.findExistingUserByEmail(userInfo.email);
     if (existingUser) {
+      if (!existingUser.isActive) {
+        throw new Error("Account is inactive. Please contact an administrator.");
+      }
+      if (existingUser.twoFactorEnabled) {
+        throw new Error("Two-factor authentication is required for this account. Please log in with password + 2FA.");
+      }
+
       const existingUserProvider = await prisma.userAuthProvider.findFirst({
         where: {
           userId: existingUser.id,
@@ -614,12 +666,28 @@ export class AuthProvidersService {
         return await this.updateExistingUserFromProvider(existingUser, userInfo);
       }
 
+      // CRITICAL: never auto-link an OIDC identity to a local account on the
+      // basis of an unverified email — that's an account-takeover vector.
+      if (userInfo.emailVerified !== true) {
+        throw new Error(
+          "Cannot link this provider to your account: the provider did not assert that this email is verified. " +
+            "Log in with your password first and link the provider from settings."
+        );
+      }
+
       return await this.linkProviderToExistingUser(existingUser, provider.id, String(externalId), userInfo);
     }
 
     // Check if auto-registration is disabled
     if (provider.autoRegister === false) {
       throw new Error(`User registration via ${provider.displayName || provider.name} is disabled`);
+    }
+
+    // CRITICAL: do not auto-create an account from an unverified email either.
+    if (userInfo.emailVerified !== true) {
+      throw new Error(
+        "Cannot register: the provider did not assert that this email is verified. Contact your administrator."
+      );
     }
 
     return await this.createNewUserWithProvider(userInfo, provider.id, String(externalId));

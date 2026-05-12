@@ -11,6 +11,7 @@ type UserWithPassword = {
   lastName?: string;
   username?: string;
   password?: string;
+  image?: string | null;
 };
 
 const prisma = new PrismaClient();
@@ -35,7 +36,11 @@ export class UserService {
 
     const hashedPassword = await bcrypt.hash(data.password, 10);
     const user = await this.userRepository.createUser({
-      ...data,
+      firstName: data.firstName,
+      lastName: data.lastName,
+      username: data.username,
+      email: data.email,
+      image: data.image,
       password: hashedPassword,
       isAdmin,
     });

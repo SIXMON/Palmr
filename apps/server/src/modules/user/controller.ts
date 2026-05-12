@@ -1,7 +1,7 @@
 import { FastifyReply, FastifyRequest } from "fastify";
 
 import { AvatarService } from "./avatar.service";
-import { createRegisterUserSchema, UpdateUserSchema } from "./dto";
+import { createRegisterUserSchema, UpdateUserImageSchema, UpdateUserSchema } from "./dto";
 import { UserService } from "./service";
 
 export class UserController {
@@ -41,7 +41,9 @@ export class UserController {
   async updateUser(request: FastifyRequest, reply: FastifyReply) {
     try {
       const input = UpdateUserSchema.parse(request.body);
-      const { id, ...updateData } = input;
+      // Strip isAdmin: privilege escalation must go through a dedicated route.
+
+      const { id, isAdmin: _ignoredIsAdmin, ...updateData } = input;
       const updatedUser = await this.userService.updateUser(id, updateData);
       return reply.send(updatedUser);
     } catch (error: any) {
@@ -81,9 +83,9 @@ export class UserController {
 
   async updateUserImage(request: FastifyRequest, reply: FastifyReply) {
     try {
-      const input = UpdateUserSchema.parse(request.body);
-      const { id, ...updateData } = input;
-      const updatedUser = await this.userService.updateUser(id, updateData);
+      const { id } = request.params as { id: string };
+      const { image } = UpdateUserImageSchema.parse(request.body);
+      const updatedUser = await this.userService.updateUser(id, { image });
       return reply.send(updatedUser);
     } catch (error: any) {
       return reply.status(400).send({ error: error.message });

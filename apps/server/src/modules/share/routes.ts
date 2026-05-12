@@ -1,9 +1,11 @@
-import { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { FastifyInstance } from "fastify";
 import { z } from "zod";
 
+import { requireAuth } from "../../shared/auth";
 import { ShareController } from "./controller";
 import {
   CreateShareSchema,
+  PublicShareResponseSchema,
   ShareAliasResponseSchema,
   ShareResponseSchema,
   UpdateShareItemsSchema,
@@ -15,14 +17,7 @@ import {
 export async function shareRoutes(app: FastifyInstance) {
   const shareController = new ShareController();
 
-  const preValidation = async (request: FastifyRequest, reply: FastifyReply) => {
-    try {
-      await request.jwtVerify();
-    } catch (err) {
-      console.error(err);
-      reply.status(401).send({ error: "Token inválido ou ausente." });
-    }
-  };
+  const preValidation = requireAuth;
 
   app.post(
     "/shares",
@@ -119,6 +114,7 @@ export async function shareRoutes(app: FastifyInstance) {
   app.delete(
     "/shares/:id",
     {
+      preValidation,
       schema: {
         tags: ["Share"],
         operationId: "deleteShare",
@@ -132,6 +128,9 @@ export async function shareRoutes(app: FastifyInstance) {
             share: ShareResponseSchema,
           }),
           400: z.object({ error: z.string().describe("Error message") }),
+          401: z.object({ error: z.string().describe("Error message") }),
+          403: z.object({ error: z.string().describe("Error message") }),
+          404: z.object({ error: z.string().describe("Error message") }),
         },
       },
     },
@@ -310,9 +309,12 @@ export async function shareRoutes(app: FastifyInstance) {
         }),
         response: {
           200: z.object({
-            share: ShareResponseSchema,
+            share: PublicShareResponseSchema,
           }),
+          401: z.object({ error: z.string() }),
+          403: z.object({ error: z.string() }),
           404: z.object({ error: z.string() }),
+          410: z.object({ error: z.string() }),
         },
       },
     },

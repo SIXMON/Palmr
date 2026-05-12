@@ -40,23 +40,26 @@ export class AppService {
     });
   }
 
-  async getPublicConfigs() {
-    const sensitiveKeys = [
-      "smtpHost",
-      "smtpPort",
-      "smtpUser",
-      "smtpPass",
-      "smtpSecure",
-      "smtpNoAuth",
-      "smtpTrustSelfSigned",
-      "jwtSecret",
-    ];
+  // Whitelist of config keys safe to return on the public, unauthenticated
+  // /app/configs/public endpoint. Using a whitelist (not a blacklist) ensures
+  // any newly added secret-bearing key does NOT leak by default.
+  private static readonly PUBLIC_CONFIG_KEYS = [
+    "appName",
+    "appDescription",
+    "appLogo",
+    "showHomePage",
+    "passwordAuthEnabled",
+    "firstUserAccess",
+    "maxFileSize",
+    "maxTotalStoragePerUser",
+    "passwordMinLength",
+    "smtpEnabled",
+  ];
 
+  async getPublicConfigs() {
     return prisma.appConfig.findMany({
       where: {
-        key: {
-          notIn: sensitiveKeys,
-        },
+        key: { in: AppService.PUBLIC_CONFIG_KEYS },
       },
       orderBy: {
         group: "asc",

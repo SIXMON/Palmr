@@ -18,7 +18,6 @@ export class FolderController {
 
   async registerFolder(request: FastifyRequest, reply: FastifyReply) {
     try {
-      await request.jwtVerify();
       const userId = (request as any).user?.userId;
       if (!userId) {
         return reply.status(401).send({ error: "Unauthorized: a valid token is required to access this resource." });
@@ -348,7 +347,6 @@ export class FolderController {
 
   async deleteFolder(request: FastifyRequest, reply: FastifyReply) {
     try {
-      await request.jwtVerify();
       const { id } = request.params as { id: string };
       if (!id) {
         return reply.status(400).send({ error: "The 'id' parameter is required." });
@@ -364,7 +362,23 @@ export class FolderController {
         return reply.status(403).send({ error: "Access denied." });
       }
 
-      await this.folderService.deleteObject(folderRecord.objectName);
+      // CRITICAL: Prisma cascade deletes DB rows only — without explicitly
+      // removing each contained file's object from storage, the bucket
+      // accumulates orphan blobs (storage leak / DoS vector).
+      const allFiles = await this.folderService.getAllFilesInFolder(id, userId);
+      for (const file of allFiles) {
+        try {
+          await this.folderService.deleteObject(file.objectName);
+        } catch (err) {
+          console.error(`Failed to delete object ${file.objectName} during folder cleanup:`, err);
+        }
+      }
+
+      try {
+        await this.folderService.deleteObject(folderRecord.objectName);
+      } catch (err) {
+        console.error(`Failed to delete folder placeholder ${folderRecord.objectName}:`, err);
+      }
 
       await prisma.folder.delete({ where: { id } });
 

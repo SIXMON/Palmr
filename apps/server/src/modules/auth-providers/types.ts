@@ -41,6 +41,7 @@ export interface ProviderEndpoints {
 export interface ProviderUserInfo {
   id: string;
   email: string;
+  emailVerified?: boolean;
   name?: string;
   firstName?: string;
   lastName?: string;

@@ -1,5 +1,6 @@
 import { FastifyReply, FastifyRequest } from "fastify";
 
+import { tryGetUserId } from "../../shared/auth";
 import {
   CreateShareSchema,
   UpdateShareItemsSchema,
@@ -52,13 +53,7 @@ export class ShareController {
       const { shareId } = request.params as { shareId: string };
       const { password } = request.query as { password?: string };
 
-      let userId: string | undefined;
-      try {
-        await request.jwtVerify();
-        userId = (request as any).user?.userId;
-      } catch (err) {
-        console.error(err);
-      }
+      const userId = (await tryGetUserId(request)) ?? undefined;
 
       const share = await this.shareService.getShare(shareId, password, userId);
       return reply.send({ share });
@@ -71,6 +66,9 @@ export class ShareController {
       }
       if (error.message === "Share has expired") {
         return reply.status(410).send({ error: error.message });
+      }
+      if (error.message === "Password required" || error.message === "Invalid password") {
+        return reply.status(401).send({ error: error.message });
       }
       return reply.status(400).send({ error: error.message });
     }
@@ -169,26 +167,22 @@ export class ShareController {
 
   async deleteShare(request: FastifyRequest, reply: FastifyReply) {
     try {
-      await request.jwtVerify();
+      // preValidation already ran requireAuth
       const userId = (request as any).user?.userId;
       if (!userId) {
         return reply.status(401).send({ error: "Unauthorized: a valid token is required to access this resource." });
       }
 
       const { id } = request.params as { id: string };
-
-      const share = await this.shareService.findShareById(id);
-      if (!share) {
-        return reply.status(404).send({ error: "Share not found" });
-      }
-
-      if (share.creatorId !== userId) {
-        return reply.status(401).send({ error: "Unauthorized to delete this share" });
-      }
-
-      const deleted = await this.shareService.deleteShare(id);
+      const deleted = await this.shareService.deleteShare(id, userId);
       return reply.send({ share: deleted });
     } catch (error: any) {
+      if (error.message === "Share not found") {
+        return reply.status(404).send({ error: error.message });
+      }
+      if (error.message === "Unauthorized to delete this share") {
+        return reply.status(403).send({ error: error.message });
+      }
       return reply.status(400).send({ error: error.message });
     }
   }

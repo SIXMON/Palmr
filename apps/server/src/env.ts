@@ -23,6 +23,9 @@ const envSchema = z.object({
   STORAGE_URL: z.string().optional(), // Storage URL for internal storage presigned URLs (required when ENABLE_S3=false, e.g., https://syrg.palmr.com or http://192.168.1.100:9379)
   DATABASE_URL: z.string().optional().default("file:/app/server/prisma/palmr.db"),
   CUSTOM_PATH: z.string().optional(),
+  JWT_SECRET: z.string().min(32).optional(),
+  CORS_ALLOWED_ORIGINS: z.string().optional(),
+  MAX_BODY_SIZE_MB: z.string().optional().default("100"),
 });
 
 export const env = envSchema.parse(process.env);

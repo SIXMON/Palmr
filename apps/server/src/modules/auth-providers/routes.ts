@@ -1,37 +1,14 @@
 import { FastifyInstance } from "fastify";
 import { z } from "zod";
 
-import { prisma } from "../../shared/prisma";
+import { requireAdmin } from "../../shared/auth";
 import { AuthProvidersController } from "./controller";
 import { CreateAuthProviderSchema, UpdateProvidersOrderSchema } from "./dto";
 
 export async function authProvidersRoutes(fastify: FastifyInstance) {
   const authProvidersController = new AuthProvidersController();
 
-  const adminPreValidation = async (request: any, reply: any) => {
-    try {
-      const usersCount = await prisma.user.count();
-
-      if (usersCount <= 1) {
-        return;
-      }
-
-      await request.jwtVerify();
-
-      if (!request.user.isAdmin) {
-        return reply.status(403).send({
-          success: false,
-          error: "Access restricted to administrators",
-        });
-      }
-    } catch (err) {
-      console.error("Admin validation error:", err);
-      return reply.status(401).send({
-        success: false,
-        error: "Unauthorized: a valid token is required to access this resource.",
-      });
-    }
-  };
+  const adminPreValidation = requireAdmin;
 
   fastify.get(
     "/providers",

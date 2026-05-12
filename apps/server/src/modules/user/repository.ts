@@ -4,7 +4,7 @@ import { prisma } from "../../shared/prisma";
 import type { RegisterUserInput, UpdateUserInput } from "./dto";
 
 export interface IUserRepository {
-  createUser(data: RegisterUserInput & { password: string }): Promise<User>;
+  createUser(data: RegisterUserInput & { password: string; isAdmin: boolean }): Promise<User>;
   findUserByEmail(email: string): Promise<User | null>;
   findUserById(id: string): Promise<User | null>;
   findUserByUsername(username: string): Promise<User | null>;
@@ -17,7 +17,7 @@ export interface IUserRepository {
 }
 
 export class PrismaUserRepository implements IUserRepository {
-  async createUser(data: RegisterUserInput & { password: string }): Promise<User> {
+  async createUser(data: RegisterUserInput & { password: string; isAdmin: boolean }): Promise<User> {
     return prisma.user.create({
       data: {
         firstName: data.firstName,
@@ -56,7 +56,10 @@ export class PrismaUserRepository implements IUserRepository {
   }
 
   async updateUser(data: UpdateUserInput & { password?: string }): Promise<User> {
-    const { id, ...rest } = data;
+    // Defense in depth: never propagate isAdmin via this repository method.
+    // Privilege escalation must go through a dedicated admin route.
+
+    const { id, isAdmin: _ignoredIsAdmin, ...rest } = data;
     return prisma.user.update({
       where: { id },
       data: rest,

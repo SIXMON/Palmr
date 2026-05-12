@@ -58,7 +58,7 @@ export class AuthController {
       const input = CompleteTwoFactorLoginSchema.parse(request.body);
       const { userAgent, ipAddress } = this.getClientInfo(request);
       const user = await this.authService.completeTwoFactorLogin(
-        input.userId,
+        input.pre2faToken,
         input.token,
         input.rememberDevice,
         userAgent,
@@ -90,8 +90,8 @@ export class AuthController {
 
   async requestPasswordReset(request: FastifyRequest, reply: FastifyReply) {
     try {
-      const { email, origin } = RequestPasswordResetSchema.parse(request.body);
-      await this.authService.requestPasswordReset(email, origin);
+      const { email } = RequestPasswordResetSchema.parse(request.body);
+      await this.authService.requestPasswordReset(email);
       return reply.send({
         message: "If an account exists with this email, a password reset link will be sent.",
       });

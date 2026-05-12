@@ -10,6 +10,40 @@ import { PrismaUserRepository } from "../user/repository";
 import { LoginInput } from "./dto";
 import { TrustedDeviceService } from "./trusted-device.service";
 
+const PRE_2FA_TOKEN_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+async function getJwtSecret(configService: ConfigService): Promise<string> {
+  // Reuse the same JWT secret (env or db-persisted)
+  if (process.env.JWT_SECRET) return process.env.JWT_SECRET;
+  return await configService.getValue("jwtSecret");
+}
+
+function signPre2faToken(userId: string, secret: string): string {
+  const payload = Buffer.from(
+    JSON.stringify({ userId, exp: Date.now() + PRE_2FA_TOKEN_TTL_MS, scope: "pre-2fa" })
+  ).toString("base64url");
+  const sig = crypto.createHmac("sha256", secret).update(payload).digest("base64url");
+  return `${payload}.${sig}`;
+}
+
+function verifyPre2faToken(token: string, secret: string): string | null {
+  const [payload, sig] = (token || "").split(".");
+  if (!payload || !sig) return null;
+  const expected = crypto.createHmac("sha256", secret).update(payload).digest("base64url");
+  const sigBuf = Buffer.from(sig);
+  const expBuf = Buffer.from(expected);
+  if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) return null;
+  try {
+    const decoded = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    if (decoded.scope !== "pre-2fa") return null;
+    if (typeof decoded.exp !== "number" || decoded.exp < Date.now()) return null;
+    if (typeof decoded.userId !== "string") return null;
+    return decoded.userId;
+  } catch {
+    return null;
+  }
+}
+
 export class AuthService {
   private userRepository = new PrismaUserRepository();
   private configService = new ConfigService();
@@ -98,9 +132,11 @@ export class AuthService {
         }
       }
 
+      const jwtSecret = await getJwtSecret(this.configService);
+      const pre2faToken = signPre2faToken(user.id, jwtSecret);
       return {
         requiresTwoFactor: true,
-        userId: user.id,
+        pre2faToken,
         message: "Two-factor authentication required",
       };
     }
@@ -109,12 +145,21 @@ export class AuthService {
   }
 
   async completeTwoFactorLogin(
-    userId: string,
+    pre2faToken: string,
     token: string,
     rememberDevice: boolean = false,
     userAgent?: string,
     ipAddress?: string
   ) {
+    // CRITICAL: require a server-signed pre-2fa token that proves the password
+    // step succeeded. Without this, /2fa/login can be brute-forced with a
+    // raw userId guess and 10^6 code attempts.
+    const jwtSecret = await getJwtSecret(this.configService);
+    const userId = verifyPre2faToken(pre2faToken, jwtSecret);
+    if (!userId) {
+      throw new Error("Invalid or expired two-factor session. Please log in again.");
+    }
+
     const user = await prisma.user.findUnique({
       where: { id: userId },
     });
@@ -127,9 +172,25 @@ export class AuthService {
       throw new Error("Account is inactive. Please contact an administrator.");
     }
 
+    // CRITICAL: count 2FA attempts so this endpoint can't be brute-forced.
+    // The throttle reuses the same login_attempts row as password login.
+    const maxAttempts = Number(await this.configService.getValue("maxLoginAttempts"));
+    const blockDurationSeconds = Number(await this.configService.getValue("loginBlockDuration"));
+    const blockDuration = blockDurationSeconds * 1000;
+    const existing = await prisma.loginAttempt.findUnique({ where: { userId } });
+    if (existing && existing.attempts >= maxAttempts && Date.now() - existing.lastAttempt.getTime() < blockDuration) {
+      const remainingTime = Math.ceil((blockDuration - (Date.now() - existing.lastAttempt.getTime())) / 1000 / 60);
+      throw new Error(`Too many failed attempts. Please try again in ${remainingTime} minutes.`);
+    }
+
     const verificationResult = await this.twoFactorService.verifyToken(userId, token);
 
     if (!verificationResult.success) {
+      await prisma.loginAttempt.upsert({
+        where: { userId },
+        create: { userId, attempts: 1, lastAttempt: new Date() },
+        update: { attempts: { increment: 1 }, lastAttempt: new Date() },
+      });
       throw new Error("Invalid two-factor authentication code");
     }
 
@@ -150,14 +211,15 @@ export class AuthService {
     return UserResponseSchema.parse(user);
   }
 
-  async requestPasswordReset(email: string, origin: string) {
+  async requestPasswordReset(email: string) {
     const passwordAuthEnabled = await this.configService.getValue("passwordAuthEnabled");
     if (passwordAuthEnabled === "false") {
       throw new Error("Password authentication is disabled. Password reset is not available.");
     }
 
     const user = await this.userRepository.findUserByEmail(email);
-    if (!user) {
+    if (!user || !user.isActive) {
+      // Always return success-shape to avoid user enumeration; do nothing if no user.
       return;
     }
 
@@ -172,8 +234,13 @@ export class AuthService {
       },
     });
 
+    // CRITICAL: the reset URL must come from server-side config, never from
+    // a client-supplied "origin" — otherwise an attacker can steal the token.
+    const serverUrl = (await this.configService.getValue("serverUrl")) || "http://localhost:3333";
+    const resetUrl = `${serverUrl.replace(/\/$/, "")}/reset-password?token=${token}`;
+
     try {
-      await this.emailService.sendPasswordResetEmail(email, token, origin);
+      await this.emailService.sendPasswordResetEmail(email, resetUrl, expirationSeconds);
     } catch (error) {
       console.error("Failed to send password reset email:", error);
       throw new Error("Failed to send password reset email");

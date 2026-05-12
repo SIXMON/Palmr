@@ -1,6 +1,7 @@
-import { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { FastifyInstance } from "fastify";
 import { z } from "zod";
 
+import { requireAuth } from "../../shared/auth";
 import { ConfigService } from "../config/service";
 import { validatePasswordMiddleware } from "../user/middleware";
 import { AuthController } from "./controller";
@@ -48,7 +49,7 @@ export async function authRoutes(app: FastifyInstance) {
             }),
             z.object({
               requiresTwoFactor: z.boolean().describe("Whether 2FA is required"),
-              userId: z.string().describe("User ID for 2FA verification"),
+              pre2faToken: z.string().describe("Short-lived token to pass to /auth/2fa/login"),
               message: z.string().describe("2FA required message"),
             }),
           ]),
@@ -205,14 +206,7 @@ export async function authRoutes(app: FastifyInstance) {
           401: z.object({ error: z.string().describe("Error message") }),
         },
       },
-      preValidation: async (request: FastifyRequest, reply: FastifyReply) => {
-        try {
-          await request.jwtVerify();
-        } catch (err) {
-          console.error(err);
-          reply.status(401).send({ error: "Unauthorized: a valid token is required to access this resource." });
-        }
-      },
+      preValidation: requireAuth,
     },
     authController.getTrustedDevices.bind(authController)
   );
@@ -236,14 +230,7 @@ export async function authRoutes(app: FastifyInstance) {
           401: z.object({ error: z.string().describe("Error message") }),
         },
       },
-      preValidation: async (request: FastifyRequest, reply: FastifyReply) => {
-        try {
-          await request.jwtVerify();
-        } catch (err) {
-          console.error(err);
-          reply.status(401).send({ error: "Unauthorized: a valid token is required to access this resource." });
-        }
-      },
+      preValidation: requireAuth,
     },
     authController.removeTrustedDevice.bind(authController)
   );
@@ -265,14 +252,7 @@ export async function authRoutes(app: FastifyInstance) {
           401: z.object({ error: z.string().describe("Error message") }),
         },
       },
-      preValidation: async (request: FastifyRequest, reply: FastifyReply) => {
-        try {
-          await request.jwtVerify();
-        } catch (err) {
-          console.error(err);
-          reply.status(401).send({ error: "Unauthorized: a valid token is required to access this resource." });
-        }
-      },
+      preValidation: requireAuth,
     },
     authController.removeAllTrustedDevices.bind(authController)
   );

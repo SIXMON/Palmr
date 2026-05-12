@@ -1,19 +1,13 @@
-import { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { FastifyInstance } from "fastify";
 import { z } from "zod";
 
+import { requireAuth } from "../../shared/auth";
 import { TwoFactorController } from "./controller";
 
 export async function twoFactorRoutes(app: FastifyInstance) {
   const twoFactorController = new TwoFactorController();
 
-  const preValidation = async (request: FastifyRequest, reply: FastifyReply) => {
-    try {
-      await request.jwtVerify();
-    } catch (err) {
-      console.error(err);
-      reply.status(401).send({ error: "Unauthorized: a valid token is required to access this resource." });
-    }
-  };
+  const preValidation = requireAuth;
 
   app.post(
     "/2fa/setup",

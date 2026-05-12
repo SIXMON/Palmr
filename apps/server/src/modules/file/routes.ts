@@ -1,20 +1,14 @@
-import { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { FastifyInstance } from "fastify";
 import { z } from "zod";
 
+import { requireAuth } from "../../shared/auth";
 import { FileController } from "./controller";
 import { CheckFileSchema, ListFilesSchema, MoveFileSchema, RegisterFileSchema, UpdateFileSchema } from "./dto";
 
 export async function fileRoutes(app: FastifyInstance) {
   const fileController = new FileController();
 
-  const preValidation = async (request: FastifyRequest, reply: FastifyReply) => {
-    try {
-      await request.jwtVerify();
-    } catch (err) {
-      console.error(err);
-      reply.status(401).send({ error: "Token inválido ou ausente." });
-    }
-  };
+  const preValidation = requireAuth;
 
   app.get(
     "/files/presigned-url",
@@ -46,6 +40,7 @@ export async function fileRoutes(app: FastifyInstance) {
   app.post(
     "/files",
     {
+      preValidation,
       schema: {
         tags: ["File"],
         operationId: "registerFile",
@@ -137,14 +132,18 @@ export async function fileRoutes(app: FastifyInstance) {
       schema: {
         tags: ["File"],
         operationId: "embedFile",
-        summary: "Embed File (Public Access)",
+        summary: "Embed File (requires share access)",
         description:
-          "Returns a media file (image/video/audio) for public embedding without authentication. Only works for media files.",
+          "Returns a media file (image/video/audio) for embedding. Requires either ownership (JWT cookie) or a valid active share. Provide share password as querystring if needed.",
         params: z.object({
           id: z.string().min(1, "File ID is required").describe("The file ID"),
         }),
+        querystring: z.object({
+          password: z.string().optional().describe("Share password if the file is behind a protected share"),
+        }),
         response: {
           400: z.object({ error: z.string().describe("Error message") }),
+          401: z.object({ error: z.string().describe("Error message - access denied") }),
           403: z.object({ error: z.string().describe("Error message - not a media file") }),
           404: z.object({ error: z.string().describe("Error message") }),
           500: z.object({ error: z.string().describe("Error message") }),

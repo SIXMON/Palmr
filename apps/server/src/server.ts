@@ -7,6 +7,7 @@ import { directoriesConfig } from "./config/directories.config";
 import { appRoutes } from "./modules/app/routes";
 import { authProvidersRoutes } from "./modules/auth-providers/routes";
 import { authRoutes } from "./modules/auth/routes";
+import { ConfigService } from "./modules/config/service";
 import { fileRoutes } from "./modules/file/routes";
 import { folderRoutes } from "./modules/folder/routes";
 import { healthRoutes } from "./modules/health/routes";
@@ -50,12 +51,23 @@ async function startServer() {
   const { runAutoMigration } = await import("./scripts/migrate-filesystem-to-s3.js");
   await runAutoMigration();
 
+  const configService = new ConfigService();
+  let multipartFileSize: number;
+  try {
+    multipartFileSize = Number(await configService.getValue("maxFileSize"));
+    if (!Number.isFinite(multipartFileSize) || multipartFileSize <= 0) {
+      throw new Error("invalid maxFileSize config");
+    }
+  } catch {
+    multipartFileSize = 1024 * 1024 * 1024; // 1 GiB fallback
+  }
+
   await app.register(fastifyMultipart, {
     limits: {
       fieldNameSize: 100,
       fieldSize: 1024 * 1024,
       fields: 10,
-      fileSize: 1024 * 1024 * 1024 * 1024 * 1024, // 1PB (1 petabyte) - practically unlimited
+      fileSize: multipartFileSize,
       files: 1,
       headerPairs: 2000,
     },

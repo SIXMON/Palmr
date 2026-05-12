@@ -274,9 +274,10 @@ export class AuthProvidersController {
       const validatedData = UpdateAuthProviderSchema.parse(data);
       const provider = await this.authProvidersService.updateProvider(id, validatedData);
       return this.sendSuccessResponse(reply, provider);
-    } catch (validationError) {
-      console.error("Validation error for custom provider:", validationError);
-      console.error("Raw data that failed validation:", data);
+    } catch (validationError: any) {
+      // Never log raw data here — it may contain `clientSecret`.
+      // Log only the validation issues themselves.
+      console.error("Validation error for custom provider:", validationError?.issues ?? validationError?.message);
       return this.sendErrorResponse(reply, 400, ERROR_MESSAGES.INVALID_DATA);
     }
   }

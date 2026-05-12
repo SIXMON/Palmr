@@ -9,14 +9,51 @@ import { serializerCompiler, validatorCompiler, ZodTypeProvider } from "fastify-
 
 import { registerSwagger } from "./config/swagger.config";
 import { envTimeoutOverrides } from "./config/timeout.config";
+import { env } from "./env";
 import { prisma } from "./shared/prisma";
 
-export async function buildApp() {
-  const jwtConfig = await prisma.appConfig.findUnique({
-    where: { key: "jwtSecret" },
-  });
+async function resolveJwtSecret(): Promise<string> {
+  if (env.JWT_SECRET) {
+    return env.JWT_SECRET;
+  }
 
-  const JWT_SECRET = jwtConfig?.value || crypto.randomBytes(64).toString("hex");
+  const existing = await prisma.appConfig.findUnique({ where: { key: "jwtSecret" } });
+  if (existing?.value && existing.value.length >= 32) {
+    return existing.value;
+  }
+
+  const generated = crypto.randomBytes(64).toString("hex");
+  await prisma.appConfig.upsert({
+    where: { key: "jwtSecret" },
+    update: { value: generated },
+    create: {
+      key: "jwtSecret",
+      value: generated,
+      type: "text",
+      group: "security",
+      isSystem: true,
+    },
+  });
+  console.warn(
+    "[security] JWT_SECRET env not set — generated and persisted a secret in app_configs. " +
+      "Set JWT_SECRET in environment for production deployments."
+  );
+  return generated;
+}
+
+function parseAllowedOrigins(raw: string | undefined): string[] | null {
+  if (!raw) return null;
+  return raw
+    .split(",")
+    .map((o) => o.trim())
+    .filter((o) => o.length > 0);
+}
+
+export async function buildApp() {
+  const JWT_SECRET = await resolveJwtSecret();
+
+  const allowedOrigins = parseAllowedOrigins(env.CORS_ALLOWED_ORIGINS);
+  const maxBodySizeBytes = Number(env.MAX_BODY_SIZE_MB) * 1024 * 1024;
 
   const app = fastify({
     ajv: {
@@ -27,7 +64,7 @@ export async function buildApp() {
     logger: {
       level: "warn",
     },
-    bodyLimit: 1024 * 1024 * 1024 * 1024 * 1024,
+    bodyLimit: maxBodySizeBytes,
     connectionTimeout: 0,
     keepAliveTimeout: envTimeoutOverrides.keepAliveTimeout,
     requestTimeout: envTimeoutOverrides.requestTimeout,
@@ -69,9 +106,16 @@ export async function buildApp() {
   });
 
   app.register(fastifyCors, {
-    origin: true,
+    origin: allowedOrigins && allowedOrigins.length > 0 ? allowedOrigins : false,
     credentials: true,
   });
+
+  if (!allowedOrigins || allowedOrigins.length === 0) {
+    console.warn(
+      "[security] CORS_ALLOWED_ORIGINS env not set — cross-origin requests are blocked. " +
+        "Set CORS_ALLOWED_ORIGINS=https://your-frontend.com (comma-separated) to allow your frontend."
+    );
+  }
 
   app.register(fastifyCookie);
   app.register(fastifyJwt, {

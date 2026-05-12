@@ -9,8 +9,7 @@ export const BaseRegisterUserSchema = z.object({
   lastName: z.string().min(1),
   username: z.string().min(3),
   email: z.string().email(),
-  image: z.string().optional(),
-  isAdmin: z.boolean().optional().default(false),
+  image: z.string().url().optional(),
 });
 
 export type BaseRegisterUserInput = z.infer<typeof BaseRegisterUserSchema>;
@@ -24,7 +23,6 @@ export const createRegisterUserSchema = async () => {
 
 export type RegisterUserInput = BaseRegisterUserInput & {
   password: string;
-  isAdmin?: boolean;
 };
 
 export const UpdateUserSchema = z.object({
@@ -33,12 +31,18 @@ export const UpdateUserSchema = z.object({
   lastName: z.string().min(1).optional(),
   username: z.string().min(3).optional(),
   email: z.string().email().optional(),
-  image: z.string().optional(),
+  image: z.string().url().optional(),
   password: z.string().optional(),
   isAdmin: z.boolean().optional(),
 });
 
 export type UpdateUserInput = z.infer<typeof UpdateUserSchema>;
+
+export const UpdateUserImageSchema = z.object({
+  image: z.string().url(),
+});
+
+export type UpdateUserImageInput = z.infer<typeof UpdateUserImageSchema>;
 
 export const UserResponseSchema = z.object({
   id: z.string(),

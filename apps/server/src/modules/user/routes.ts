@@ -1,7 +1,7 @@
-import { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { FastifyInstance } from "fastify";
 import { z } from "zod";
 
-import { prisma } from "../../shared/prisma";
+import { requireAdmin, requireAuth } from "../../shared/auth";
 import { createPasswordSchema } from "../auth/dto";
 import { UserController } from "./controller";
 import { UpdateUserSchema, UserResponseSchema } from "./dto";
@@ -10,32 +10,9 @@ import { validatePasswordMiddleware } from "./middleware";
 export async function userRoutes(app: FastifyInstance) {
   const userController = new UserController();
 
-  const preValidation = async (request: any, reply: any) => {
-    try {
-      const usersCount = await prisma.user.count();
-
-      if (usersCount > 0) {
-        try {
-          await request.jwtVerify();
-          if (!request.user.isAdmin) {
-            return reply
-              .status(403)
-              .send({ error: "Access restricted to administrators" })
-              .description("Access restricted to administrators");
-          }
-        } catch (authErr) {
-          console.error(authErr);
-          return reply
-            .status(401)
-            .send({ error: "Unauthorized: a valid token is required to access this resource." })
-            .description("Unauthorized: a valid token is required to access this resource.");
-        }
-      }
-    } catch (err) {
-      console.error(err);
-      return reply.status(500).send({ error: "Internal server error" }).description("Internal server error");
-    }
-  };
+  // Admin-only routes. First-user bootstrap is handled by requireAdmin
+  // (no auth required when users table is empty).
+  const preValidation = requireAdmin;
 
   const createRegisterSchema = async () => {
     const passwordSchema = await createPasswordSchema();
@@ -323,14 +300,7 @@ export async function userRoutes(app: FastifyInstance) {
   app.post(
     "/users/avatar",
     {
-      preValidation: async (request: FastifyRequest, reply: FastifyReply) => {
-        try {
-          await request.jwtVerify();
-        } catch (err) {
-          console.error(err);
-          return reply.status(401).send({ error: "Unauthorized" });
-        }
-      },
+      preValidation: requireAuth,
       schema: {
         tags: ["User"],
         operationId: "uploadAvatar",
@@ -350,14 +320,7 @@ export async function userRoutes(app: FastifyInstance) {
   app.delete(
     "/users/avatar",
     {
-      preValidation: async (request: FastifyRequest, reply: FastifyReply) => {
-        try {
-          await request.jwtVerify();
-        } catch (err) {
-          console.error(err);
-          reply.status(401).send({ error: "Unauthorized" });
-        }
-      },
+      preValidation: requireAuth,
       schema: {
         tags: ["User"],
         operationId: "removeAvatar",

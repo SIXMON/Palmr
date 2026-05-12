@@ -57,6 +57,55 @@ export class ReverseShareService {
     }
   >();
 
+  // Maps server-generated objectNames (and uploadIds) to their owning reverseShareId
+  // so we can reject client-supplied objectNames that don't belong to the share.
+  private pendingObjectNames = new Map<string, { reverseShareId: string; expiresAt: number }>();
+  private pendingMultipartUploads = new Map<
+    string,
+    { reverseShareId: string; objectName: string; expiresAt: number }
+  >();
+
+  private rememberObjectName(reverseShareId: string, objectName: string) {
+    // Expire after 24h to bound memory growth
+    this.pendingObjectNames.set(objectName, {
+      reverseShareId,
+      expiresAt: Date.now() + 24 * 60 * 60 * 1000,
+    });
+  }
+
+  private assertObjectNameBelongsToReverseShare(reverseShareId: string, objectName: string) {
+    const entry = this.pendingObjectNames.get(objectName);
+    if (!entry || entry.reverseShareId !== reverseShareId || entry.expiresAt < Date.now()) {
+      throw new Error("Invalid objectName for this reverse share");
+    }
+  }
+
+  private rememberMultipartUpload(reverseShareId: string, uploadId: string, objectName: string) {
+    this.pendingMultipartUploads.set(uploadId, {
+      reverseShareId,
+      objectName,
+      expiresAt: Date.now() + 24 * 60 * 60 * 1000,
+    });
+  }
+
+  private resolveMultipartUpload(reverseShareId: string, uploadId: string, objectName: string) {
+    const entry = this.pendingMultipartUploads.get(uploadId);
+    if (
+      !entry ||
+      entry.reverseShareId !== reverseShareId ||
+      entry.objectName !== objectName ||
+      entry.expiresAt < Date.now()
+    ) {
+      throw new Error("Invalid uploadId or objectName for this reverse share");
+    }
+  }
+
+  private generateObjectName(scope: string, filename: string, extension: string): string {
+    const safeBase = filename.replace(/[^a-zA-Z0-9._-]/g, "_");
+    const safeExt = extension.replace(/[^a-zA-Z0-9]/g, "");
+    return `reverse-shares/${scope}/${Date.now()}-${Math.random().toString(36).substring(7)}-${safeBase}.${safeExt}`;
+  }
+
   async createReverseShare(data: CreateReverseShareInput, creatorId: string) {
     const reverseShare = await this.reverseShareRepository.create(data, creatorId);
     return ReverseShareResponseSchema.parse(this.formatReverseShareResponse(reverseShare));
@@ -203,87 +252,58 @@ export class ReverseShareService {
     return ReverseShareResponseSchema.parse(this.formatReverseShareResponse(deletedReverseShare));
   }
 
-  async getPresignedUrl(id: string, objectName: string, password?: string) {
+  /**
+   * CRITICAL: the client must NOT supply objectName. Generate it server-side
+   * from filename+extension and remember the mapping for register-file.
+   * Otherwise an attacker can overwrite arbitrary S3 objects.
+   */
+  async getPresignedUrl(id: string, filename: string, extension: string, password?: string) {
     const reverseShare = await this.reverseShareRepository.findById(id);
     if (!reverseShare) {
       throw new Error("Reverse share not found");
     }
-
     if (!reverseShare.isActive) {
       throw new Error("Reverse share is inactive");
     }
-
     if (reverseShare.expiration && new Date(reverseShare.expiration) < new Date()) {
       throw new Error("Reverse share has expired");
     }
-
     if (reverseShare.password) {
-      if (!password) {
-        throw new Error("Password required");
-      }
+      if (!password) throw new Error("Password required");
       const isValidPassword = await this.reverseShareRepository.comparePassword(password, reverseShare.password);
-      if (!isValidPassword) {
-        throw new Error("Invalid password");
-      }
+      if (!isValidPassword) throw new Error("Invalid password");
     }
 
-    const expires = parseInt(env.PRESIGNED_URL_EXPIRATION);
+    const objectName = this.generateObjectName(reverseShare.id, filename, extension);
+    this.rememberObjectName(reverseShare.id, objectName);
 
-    // Import storage config to check if using internal or external S3
-    const { isInternalStorage } = await import("../../config/storage.config.js");
-
-    if (isInternalStorage) {
-      // Internal storage: Use backend proxy for uploads (127.0.0.1 not accessible from client)
-      // Note: This would need request context, but reverse-shares are typically used by external users
-      // For now, we'll use presigned URLs and handle the error on the client side
-      const url = await this.fileService.getPresignedPutUrl(objectName, expires);
-      return { url, expiresIn: expires };
-    } else {
-      // External S3: Use presigned URLs directly (more efficient)
-      const url = await this.fileService.getPresignedPutUrl(objectName, expires);
-      return { url, expiresIn: expires };
-    }
+    const expires = parseInt(env.PRESIGNED_URL_EXPIRATION, 10);
+    const url = await this.fileService.getPresignedPutUrl(objectName, expires);
+    return { url, objectName, expiresIn: expires };
   }
 
-  async getPresignedUrlByAlias(alias: string, objectName: string, password?: string) {
-    const reverseShare = await this.reverseShareRepository.findByAlias(alias);
-    if (!reverseShare) {
-      throw new Error("Reverse share not found");
-    }
+  async getPresignedUrlByAlias(alias: string, filename: string, extension: string, password?: string) {
+    const reverseShare = await this.validateReverseShareAccessByAlias(alias, password);
+    const objectName = this.generateObjectName(alias, filename, extension);
+    this.rememberObjectName(reverseShare.id, objectName);
 
-    if (!reverseShare.isActive) {
-      throw new Error("Reverse share is inactive");
-    }
+    const expires = parseInt(env.PRESIGNED_URL_EXPIRATION, 10);
+    const url = await this.fileService.getPresignedPutUrl(objectName, expires);
+    return { url, objectName, expiresIn: expires };
+  }
 
-    if (reverseShare.expiration && new Date(reverseShare.expiration) < new Date()) {
-      throw new Error("Reverse share has expired");
+  private validateUploadConstraints(reverseShare: any, fileData: UploadToReverseShareInput, currentFileCount: number) {
+    if (reverseShare.maxFiles && currentFileCount >= reverseShare.maxFiles) {
+      throw new Error("Maximum number of files reached");
     }
-
-    if (reverseShare.password) {
-      if (!password) {
-        throw new Error("Password required");
+    if (reverseShare.maxFileSize && BigInt(fileData.size) > reverseShare.maxFileSize) {
+      throw new Error("File size exceeds limit");
+    }
+    if (reverseShare.allowedFileTypes) {
+      const allowedTypes = reverseShare.allowedFileTypes.split(",").map((type: string) => type.trim().toLowerCase());
+      if (!allowedTypes.includes(fileData.extension.toLowerCase())) {
+        throw new Error("File type not allowed");
       }
-      const isValidPassword = await this.reverseShareRepository.comparePassword(password, reverseShare.password);
-      if (!isValidPassword) {
-        throw new Error("Invalid password");
-      }
-    }
-
-    const expires = parseInt(env.PRESIGNED_URL_EXPIRATION);
-
-    // Import storage config to check if using internal or external S3
-    const { isInternalStorage } = await import("../../config/storage.config.js");
-
-    if (isInternalStorage) {
-      // Internal storage: Use backend proxy for uploads (127.0.0.1 not accessible from client)
-      // Note: This would need request context, but reverse-shares are typically used by external users
-      // For now, we'll use presigned URLs and handle the error on the client side
-      const url = await this.fileService.getPresignedPutUrl(objectName, expires);
-      return { url, expiresIn: expires };
-    } else {
-      // External S3: Use presigned URLs directly (more efficient)
-      const url = await this.fileService.getPresignedPutUrl(objectName, expires);
-      return { url, expiresIn: expires };
     }
   }
 
@@ -311,28 +331,20 @@ export class ReverseShareService {
       }
     }
 
-    if (reverseShare.maxFiles) {
-      const currentFileCount = await this.reverseShareRepository.countFilesByReverseShareId(reverseShareId);
-      if (currentFileCount >= reverseShare.maxFiles) {
-        throw new Error("Maximum number of files reached");
-      }
-    }
+    // CRITICAL: prevent attackers from registering an arbitrary objectName
+    // (would let them attach another user's file to this reverse share).
+    this.assertObjectNameBelongsToReverseShare(reverseShareId, fileData.objectName);
 
-    if (reverseShare.maxFileSize && BigInt(fileData.size) > reverseShare.maxFileSize) {
-      throw new Error("File size exceeds limit");
-    }
-
-    if (reverseShare.allowedFileTypes) {
-      const allowedTypes = reverseShare.allowedFileTypes.split(",").map((type) => type.trim().toLowerCase());
-      if (!allowedTypes.includes(fileData.extension.toLowerCase())) {
-        throw new Error("File type not allowed");
-      }
-    }
+    const currentFileCount = await this.reverseShareRepository.countFilesByReverseShareId(reverseShareId);
+    this.validateUploadConstraints(reverseShare, fileData, currentFileCount);
 
     const file = await this.reverseShareRepository.createFile(reverseShareId, {
       ...fileData,
       size: BigInt(fileData.size),
     });
+
+    // One-shot use of the pending objectName
+    this.pendingObjectNames.delete(fileData.objectName);
 
     this.addFileToUploadSession(reverseShare, fileData);
 
@@ -340,51 +352,19 @@ export class ReverseShareService {
   }
 
   async registerFileUploadByAlias(alias: string, fileData: UploadToReverseShareInput, password?: string) {
-    const reverseShare = await this.reverseShareRepository.findByAlias(alias);
-    if (!reverseShare) {
-      throw new Error("Reverse share not found");
-    }
+    const reverseShare = await this.validateReverseShareAccessByAlias(alias, password);
 
-    if (!reverseShare.isActive) {
-      throw new Error("Reverse share is inactive");
-    }
+    this.assertObjectNameBelongsToReverseShare(reverseShare.id, fileData.objectName);
 
-    if (reverseShare.expiration && new Date(reverseShare.expiration) < new Date()) {
-      throw new Error("Reverse share has expired");
-    }
-
-    if (reverseShare.password) {
-      if (!password) {
-        throw new Error("Password required");
-      }
-      const isValidPassword = await this.reverseShareRepository.comparePassword(password, reverseShare.password);
-      if (!isValidPassword) {
-        throw new Error("Invalid password");
-      }
-    }
-
-    if (reverseShare.maxFiles) {
-      const currentFileCount = await this.reverseShareRepository.countFilesByReverseShareId(reverseShare.id);
-      if (currentFileCount >= reverseShare.maxFiles) {
-        throw new Error("Maximum number of files reached");
-      }
-    }
-
-    if (reverseShare.maxFileSize && BigInt(fileData.size) > reverseShare.maxFileSize) {
-      throw new Error("File size exceeds limit");
-    }
-
-    if (reverseShare.allowedFileTypes) {
-      const allowedTypes = reverseShare.allowedFileTypes.split(",").map((type) => type.trim().toLowerCase());
-      if (!allowedTypes.includes(fileData.extension.toLowerCase())) {
-        throw new Error("File type not allowed");
-      }
-    }
+    const currentFileCount = await this.reverseShareRepository.countFilesByReverseShareId(reverseShare.id);
+    this.validateUploadConstraints(reverseShare, fileData, currentFileCount);
 
     const file = await this.reverseShareRepository.createFile(reverseShare.id, {
       ...fileData,
       size: BigInt(fileData.size),
     });
+
+    this.pendingObjectNames.delete(fileData.objectName);
 
     this.addFileToUploadSession(reverseShare, fileData);
 
@@ -815,12 +795,16 @@ export class ReverseShareService {
     extension: string,
     password?: string
   ): Promise<{ uploadId: string; objectName: string }> {
-    await this.validateReverseShareAccessByAlias(alias, password);
+    const reverseShare = await this.validateReverseShareAccessByAlias(alias, password);
 
-    // Generate unique object name using timestamp and random suffix
-    const objectName = `reverse-shares/${alias}/${Date.now()}-${Math.random().toString(36).substring(7)}-${filename}.${extension}`;
+    const objectName = this.generateObjectName(alias, filename, extension);
 
     const uploadId = await this.fileService.createMultipartUpload(objectName);
+
+    // Persist (uploadId, objectName) binding so subsequent part/complete/abort
+    // calls cannot swap in a different (attacker-controlled) objectName.
+    this.rememberMultipartUpload(reverseShare.id, uploadId, objectName);
+    this.rememberObjectName(reverseShare.id, objectName);
 
     return {
       uploadId,
@@ -835,9 +819,10 @@ export class ReverseShareService {
     partNumber: number,
     password?: string
   ): Promise<{ url: string }> {
-    await this.validateReverseShareAccessByAlias(alias, password);
+    const reverseShare = await this.validateReverseShareAccessByAlias(alias, password);
+    this.resolveMultipartUpload(reverseShare.id, uploadId, objectName);
 
-    const expires = parseInt(env.PRESIGNED_URL_EXPIRATION);
+    const expires = parseInt(env.PRESIGNED_URL_EXPIRATION, 10);
     const url = await this.fileService.getPresignedPartUrl(objectName, uploadId, partNumber, expires);
 
     return { url };
@@ -850,9 +835,11 @@ export class ReverseShareService {
     parts: Array<{ PartNumber: number; ETag: string }>,
     password?: string
   ): Promise<{ message: string; objectName: string }> {
-    await this.validateReverseShareAccessByAlias(alias, password);
+    const reverseShare = await this.validateReverseShareAccessByAlias(alias, password);
+    this.resolveMultipartUpload(reverseShare.id, uploadId, objectName);
 
     await this.fileService.completeMultipartUpload(objectName, uploadId, parts);
+    this.pendingMultipartUploads.delete(uploadId);
 
     return {
       message: "Multipart upload completed successfully",
@@ -866,9 +853,12 @@ export class ReverseShareService {
     objectName: string,
     password?: string
   ): Promise<{ message: string }> {
-    await this.validateReverseShareAccessByAlias(alias, password);
+    const reverseShare = await this.validateReverseShareAccessByAlias(alias, password);
+    this.resolveMultipartUpload(reverseShare.id, uploadId, objectName);
 
     await this.fileService.abortMultipartUpload(objectName, uploadId);
+    this.pendingMultipartUploads.delete(uploadId);
+    this.pendingObjectNames.delete(objectName);
 
     return {
       message: "Multipart upload aborted successfully",

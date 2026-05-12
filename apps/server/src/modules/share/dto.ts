@@ -136,6 +136,54 @@ export const CreateShareAliasSchema = z.object({
     .describe("The custom alias for the share"),
 });
 
+/**
+ * Public response schema for unauthenticated share access (e.g. /shares/alias/:alias).
+ * Excludes creatorId, recipients (PII), and any per-file/per-folder userId leaks.
+ */
+export const PublicShareResponseSchema = z.object({
+  id: z.string().describe("The share ID"),
+  name: z.string().nullable().describe("The share name"),
+  description: z.string().nullable().describe("The share description"),
+  expiration: z.string().nullable().describe("The share expiration date"),
+  views: z.number().describe("The number of views"),
+  createdAt: z.string().describe("The share creation date"),
+  updatedAt: z.string().describe("The share update date"),
+  security: z.object({
+    maxViews: z.number().nullable().describe("The maximum number of views"),
+    hasPassword: z.boolean().describe("Whether the share has a password"),
+  }),
+  files: z.array(
+    z.object({
+      id: z.string().describe("The file ID"),
+      name: z.string().describe("The file name"),
+      description: z.string().nullable().describe("The file description"),
+      extension: z.string().describe("The file extension"),
+      size: z.string().describe("The file size"),
+      createdAt: z.string().describe("The file creation date"),
+      updatedAt: z.string().describe("The file update date"),
+    })
+  ),
+  folders: z.array(
+    z.object({
+      id: z.string().describe("The folder ID"),
+      name: z.string().describe("The folder name"),
+      description: z.string().nullable().describe("The folder description"),
+      totalSize: z.string().nullable().describe("The total size of folder contents"),
+      createdAt: z.string().describe("The folder creation date"),
+      updatedAt: z.string().describe("The folder update date"),
+      _count: z
+        .object({
+          files: z.number().describe("Number of files in folder"),
+          children: z.number().describe("Number of subfolders"),
+        })
+        .optional(),
+    })
+  ),
+  alias: ShareAliasResponseSchema.nullable(),
+});
+
+export type PublicShareResponse = z.infer<typeof PublicShareResponseSchema>;
+
 export type CreateShareInput = z.infer<typeof CreateShareSchema>;
 export type UpdateShareInput = z.infer<typeof UpdateShareSchema>;
 export type ShareResponse = z.infer<typeof ShareResponseSchema>;

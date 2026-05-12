@@ -1,6 +1,7 @@
-import { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { FastifyInstance } from "fastify";
 import { z } from "zod";
 
+import { requireAuth } from "../../shared/auth";
 import { ReverseShareController } from "./controller";
 import {
   CreateReverseShareSchema,
@@ -18,14 +19,7 @@ import {
 export async function reverseShareRoutes(app: FastifyInstance) {
   const reverseShareController = new ReverseShareController();
 
-  const preValidation = async (request: FastifyRequest, reply: FastifyReply) => {
-    try {
-      await request.jwtVerify();
-    } catch (err) {
-      console.error(err);
-      reply.status(401).send({ error: "Token inválido ou ausente." });
-    }
-  };
+  const preValidation = requireAuth;
 
   app.post(
     "/reverse-shares",
@@ -249,8 +243,10 @@ export async function reverseShareRoutes(app: FastifyInstance) {
         response: {
           200: z.object({
             url: z.string().describe("Presigned URL for file upload"),
+            objectName: z.string().describe("Server-generated object name to use when registering the upload"),
             expiresIn: z.number().describe("URL expiration time in seconds"),
           }),
+          400: z.object({ error: z.string() }),
           401: z.object({ error: z.string() }),
           403: z.object({ error: z.string() }),
           404: z.object({ error: z.string() }),
@@ -280,8 +276,10 @@ export async function reverseShareRoutes(app: FastifyInstance) {
         response: {
           200: z.object({
             url: z.string().describe("Presigned URL for file upload"),
+            objectName: z.string().describe("Server-generated object name to use when registering the upload"),
             expiresIn: z.number().describe("URL expiration time in seconds"),
           }),
+          400: z.object({ error: z.string() }),
           401: z.object({ error: z.string() }),
           403: z.object({ error: z.string() }),
           404: z.object({ error: z.string() }),
@@ -386,7 +384,6 @@ export async function reverseShareRoutes(app: FastifyInstance) {
     "/reverse-shares/files/:fileId/download",
     {
       preValidation,
-      bodyLimit: 1024 * 1024 * 1024 * 1024 * 1024, // 1PB limit for large video files
       schema: {
         tags: ["Reverse Share"],
         operationId: "downloadReverseShareFile",

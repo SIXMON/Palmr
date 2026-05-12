@@ -24,6 +24,67 @@ import {
 } from "./dto";
 import { FileService } from "./service";
 
+/**
+ * Returns true if the requester is authorized to access this file via:
+ *  - ownership (own file), OR
+ *  - at least one ACTIVE share (not expired, under maxViews) where the password
+ *    is either absent or matches the supplied one.
+ * Atomically increments the matching share's view counter so that maxViews
+ * limits cannot be bypassed by parallel requests.
+ */
+async function checkFileShareAccess(
+  fileId: string,
+  fileOwnerId: string,
+  password: string | undefined,
+  requesterId: string | null
+): Promise<{ allowed: boolean }> {
+  if (requesterId && requesterId === fileOwnerId) {
+    return { allowed: true };
+  }
+
+  const now = new Date();
+  const shares = await prisma.share.findMany({
+    where: {
+      files: { some: { id: fileId } },
+      OR: [{ expiration: null }, { expiration: { gt: now } }],
+    },
+    include: { security: true },
+  });
+
+  for (const share of shares) {
+    if (share.security?.maxViews !== null && share.views >= share.security.maxViews!) {
+      continue;
+    }
+
+    if (share.security.password) {
+      if (!password) continue;
+      const valid = await bcrypt.compare(password, share.security.password);
+      if (!valid) continue;
+    }
+
+    // Atomic conditional increment so concurrent requests can't exceed maxViews.
+    if (share.security.maxViews !== null) {
+      const updated = await prisma.share.updateMany({
+        where: {
+          id: share.id,
+          views: { lt: share.security.maxViews! },
+        },
+        data: { views: { increment: 1 } },
+      });
+      if (updated.count === 0) continue;
+    } else {
+      await prisma.share.update({
+        where: { id: share.id },
+        data: { views: { increment: 1 } },
+      });
+    }
+
+    return { allowed: true };
+  }
+
+  return { allowed: false };
+}
+
 export class FileController {
   private fileService = new FileService();
   private configService = new ConfigService();
@@ -57,13 +118,29 @@ export class FileController {
 
   async registerFile(request: FastifyRequest, reply: FastifyReply) {
     try {
-      await request.jwtVerify();
+      // preValidation already ran requireAuth
       const userId = (request as any).user?.userId;
       if (!userId) {
         return reply.status(401).send({ error: "Unauthorized: a valid token is required to access this resource." });
       }
 
       const input: RegisterFileInput = RegisterFileSchema.parse(request.body);
+
+      // CRITICAL: prevent IDOR — the objectName must belong to this user.
+      // getPresignedUrl always generates `${userId}/...` so we enforce that prefix
+      // and reject obvious attempts at path traversal or hijacking another user's file.
+      if (!input.objectName.startsWith(`${userId}/`) || input.objectName.includes("..")) {
+        return reply
+          .status(403)
+          .send({ error: "Invalid objectName: must be obtained from this user's presigned URL." });
+      }
+
+      // Reject duplicate registration of the same objectName (defense against
+      // attackers reusing a leaked objectName from another user).
+      const existing = await prisma.file.findFirst({ where: { objectName: input.objectName } });
+      if (existing) {
+        return reply.status(409).send({ error: "This file is already registered." });
+      }
 
       const maxFileSize = BigInt(await this.configService.getValue("maxFileSize"));
       if (BigInt(input.size) > maxFileSize) {
@@ -215,52 +292,22 @@ export class FileController {
         return reply.status(404).send({ error: "File not found." });
       }
 
-      let hasAccess = false;
-
-      const shares = await prisma.share.findMany({
-        where: {
-          files: {
-            some: {
-              id: fileRecord.id,
-            },
-          },
-        },
-        include: {
-          security: true,
-        },
-      });
-
-      for (const share of shares) {
-        if (!share.security.password) {
-          hasAccess = true;
-          break;
-        } else if (password) {
-          const isPasswordValid = await bcrypt.compare(password, share.security.password);
-          if (isPasswordValid) {
-            hasAccess = true;
-            break;
-          }
-        }
+      let requesterId: string | null = null;
+      try {
+        await request.jwtVerify();
+        requesterId = (request as any).user?.userId ?? null;
+      } catch {
+        // auth optional — fall through with requesterId = null
       }
 
-      if (!hasAccess) {
-        try {
-          await request.jwtVerify();
-          const userId = (request as any).user?.userId;
-          if (userId && fileRecord.userId === userId) {
-            hasAccess = true;
-          }
-        } catch (err) {}
-      }
-
-      if (!hasAccess) {
+      const { allowed } = await checkFileShareAccess(fileRecord.id, fileRecord.userId, password, requesterId);
+      if (!allowed) {
         return reply.status(401).send({ error: "Unauthorized access to file." });
       }
 
       const fileName = fileRecord.name;
-      const expires = parseInt(env.PRESIGNED_URL_EXPIRATION);
+      const expires = parseInt(env.PRESIGNED_URL_EXPIRATION, 10);
 
-      // Always use presigned URLs (works for both internal and external storage)
       const url = await this.fileService.getPresignedGetUrl(objectName, expires, fileName);
       return reply.send({ url, expiresIn: expires });
     } catch (error) {
@@ -321,45 +368,16 @@ export class FileController {
         return reply.status(404).send({ error: "File not found." });
       }
 
-      let hasAccess = false;
-
-      const shares = await prisma.share.findMany({
-        where: {
-          files: {
-            some: {
-              id: fileRecord.id,
-            },
-          },
-        },
-        include: {
-          security: true,
-        },
-      });
-
-      for (const share of shares) {
-        if (!share.security.password) {
-          hasAccess = true;
-          break;
-        } else if (password) {
-          const isPasswordValid = await bcrypt.compare(password, share.security.password);
-          if (isPasswordValid) {
-            hasAccess = true;
-            break;
-          }
-        }
+      let requesterId: string | null = null;
+      try {
+        await request.jwtVerify();
+        requesterId = (request as any).user?.userId ?? null;
+      } catch {
+        // auth optional — fall through with requesterId = null
       }
 
-      if (!hasAccess) {
-        try {
-          await request.jwtVerify();
-          const userId = (request as any).user?.userId;
-          if (userId && fileRecord.userId === userId) {
-            hasAccess = true;
-          }
-        } catch (err) {}
-      }
-
-      if (!hasAccess) {
+      const { allowed } = await checkFileShareAccess(fileRecord.id, fileRecord.userId, password, requesterId);
+      if (!allowed) {
         return reply.status(401).send({ error: "Unauthorized access to file." });
       }
 
@@ -583,6 +601,7 @@ export class FileController {
   async embedFile(request: FastifyRequest, reply: FastifyReply) {
     try {
       const { id } = request.params as { id: string };
+      const { password } = request.query as { password?: string };
 
       if (!id) {
         return reply.status(400).send({ error: "File ID is required." });
@@ -595,7 +614,7 @@ export class FileController {
       }
 
       const extension = fileRecord.extension.toLowerCase();
-      const imageExts = ["jpg", "jpeg", "png", "gif", "webp", "svg", "bmp", "ico", "avif"];
+      const imageExts = ["jpg", "jpeg", "png", "gif", "webp", "bmp", "ico", "avif"]; // SVG removed to prevent XSS
       const videoExts = ["mp4", "webm", "ogg", "mov", "avi", "mkv", "flv", "wmv"];
       const audioExts = ["mp3", "wav", "ogg", "m4a", "flac", "aac", "wma"];
 
@@ -607,6 +626,22 @@ export class FileController {
         });
       }
 
+      // CRITICAL: /embed/:id is public but must require either ownership or
+      // a valid active share. Without this check, anyone could enumerate file
+      // IDs (cuid) and exfiltrate media.
+      let requesterId: string | null = null;
+      try {
+        await request.jwtVerify();
+        requesterId = (request as any).user?.userId ?? null;
+      } catch {
+        // anonymous access permitted only if a share grants it
+      }
+
+      const { allowed } = await checkFileShareAccess(fileRecord.id, fileRecord.userId, password, requesterId);
+      if (!allowed) {
+        return reply.status(401).send({ error: "Unauthorized access to file." });
+      }
+
       // Stream from S3/MinIO
       const stream = await this.fileService.getObjectStream(fileRecord.objectName);
       const contentType = getContentType(fileRecord.name);
@@ -615,7 +650,8 @@ export class FileController {
       reply.header("Content-Type", contentType);
       reply.header("Content-Disposition", `inline; filename="${encodeURIComponent(fileName)}"`);
       reply.header("Content-Length", fileRecord.size.toString());
-      reply.header("Cache-Control", "public, max-age=31536000"); // Cache por 1 ano
+      // No caching: ACL decisions can change (expiration / maxViews / revoked share)
+      reply.header("Cache-Control", "private, no-store");
 
       return reply.send(stream);
     } catch (error) {

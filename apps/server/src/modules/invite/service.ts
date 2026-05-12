@@ -48,18 +48,7 @@ export class InviteService {
     email: string;
     password: string;
   }): Promise<{ id: string; username: string; email: string }> {
-    const validation = await this.validateInviteToken(data.token);
-
-    if (!validation.valid) {
-      if (validation.used) {
-        throw new Error("This invite link has already been used");
-      }
-      if (validation.expired) {
-        throw new Error("This invite link has expired");
-      }
-      throw new Error("Invalid invite link");
-    }
-
+    // Existence check before bcrypt to fail fast on obvious dupes.
     const existingUser = await prisma.user.findFirst({
       where: {
         OR: [{ username: data.username }, { email: data.email }],
@@ -76,7 +65,29 @@ export class InviteService {
     }
 
     const hashedPassword = await bcrypt.hash(data.password, 10);
+
+    // CRITICAL: claim the invite token atomically. updateMany returns
+    // count > 0 only if the token is unused and not expired, so two
+    // concurrent registrations cannot both succeed with the same token.
     const result = await prisma.$transaction(async (tx) => {
+      const claim = await tx.inviteToken.updateMany({
+        where: {
+          token: data.token,
+          usedAt: null,
+          expiresAt: { gt: new Date() },
+        },
+        data: { usedAt: new Date() },
+      });
+
+      if (claim.count !== 1) {
+        // Re-read to give a precise error message
+        const inviteToken = await tx.inviteToken.findUnique({ where: { token: data.token } });
+        if (!inviteToken) throw new Error("Invalid invite link");
+        if (inviteToken.usedAt) throw new Error("This invite link has already been used");
+        if (new Date() > inviteToken.expiresAt) throw new Error("This invite link has expired");
+        throw new Error("Invalid invite link");
+      }
+
       const user = await tx.user.create({
         data: {
           firstName: data.firstName,
@@ -92,11 +103,6 @@ export class InviteService {
           username: true,
           email: true,
         },
-      });
-
-      await tx.inviteToken.update({
-        where: { token: data.token },
-        data: { usedAt: new Date() },
       });
 
       return user;

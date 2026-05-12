@@ -1,47 +1,55 @@
 /**
  * S3 Storage Controller (Simplified)
  *
- * This controller handles uploads/downloads using S3-compatible storage (Garage).
- * It's much simpler than the filesystem controller because:
- * - Uses S3 multipart uploads (no chunk management needed)
- * - Uses presigned URLs (no streaming through Node.js)
- * - No memory management needed (Garage handles it)
- * - No encryption needed (Garage handles it)
- *
- * Replaces ~800 lines of complex code with ~100 lines of simple code.
+ * Auth-protected wrappers around the S3 storage provider.
+ * Every endpoint enforces that the supplied objectName starts with the
+ * caller's `<userId>/` prefix to prevent IDOR / object overwrite attacks.
  */
 
 import { FastifyReply, FastifyRequest } from "fastify";
 
 import { S3StorageProvider } from "../../providers/s3-storage.provider";
 
+function getUserIdOrReply(request: FastifyRequest, reply: FastifyReply): string | null {
+  const userId = (request as any).user?.userId as string | undefined;
+  if (!userId) {
+    reply.status(401).send({ error: "Unauthorized" });
+    return null;
+  }
+  return userId;
+}
+
+function assertOwnsObject(userId: string, objectName: string, reply: FastifyReply): boolean {
+  if (!objectName || objectName.includes("..") || !objectName.startsWith(`${userId}/`)) {
+    reply.status(403).send({ error: "Access denied for this objectName" });
+    return false;
+  }
+  return true;
+}
+
 export class S3StorageController {
   private storageProvider = new S3StorageProvider();
 
-  /**
-   * Generate presigned upload URL
-   * Client uploads directly to S3 (Garage)
-   */
   async getUploadUrl(request: FastifyRequest, reply: FastifyReply) {
     try {
+      const userId = getUserIdOrReply(request, reply);
+      if (!userId) return;
+
       const { objectName, expires } = request.body as { objectName: string; expires?: number };
 
       if (!objectName) {
         return reply.status(400).send({ error: "objectName is required" });
       }
+      if (!assertOwnsObject(userId, objectName, reply)) return;
 
-      const expiresIn = expires || 3600; // 1 hour default
+      const expiresIn = expires || 3600;
 
-      // Import storage config to check if using internal or external S3
       const { isInternalStorage } = await import("../../config/storage.config.js");
 
       let uploadUrl: string;
-
       if (isInternalStorage) {
-        // Internal storage: Use frontend proxy (much simpler!)
         uploadUrl = `/api/files/upload?objectName=${encodeURIComponent(objectName)}`;
       } else {
-        // External S3: Use presigned URLs directly (more efficient)
         uploadUrl = await this.storageProvider.getPresignedPutUrl(objectName, expiresIn);
       }
 
@@ -57,13 +65,11 @@ export class S3StorageController {
     }
   }
 
-  /**
-   * Generate presigned download URL
-   * For internal storage: Uses backend proxy
-   * For external S3: Uses presigned URLs directly
-   */
   async getDownloadUrl(request: FastifyRequest, reply: FastifyReply) {
     try {
+      const userId = getUserIdOrReply(request, reply);
+      if (!userId) return;
+
       const { objectName, expires, fileName } = request.query as {
         objectName: string;
         expires?: string;
@@ -73,8 +79,8 @@ export class S3StorageController {
       if (!objectName) {
         return reply.status(400).send({ error: "objectName is required" });
       }
+      if (!assertOwnsObject(userId, objectName, reply)) return;
 
-      // Check if file exists
       const exists = await this.storageProvider.fileExists(objectName);
       if (!exists) {
         return reply.status(404).send({ error: "File not found" });
@@ -82,16 +88,12 @@ export class S3StorageController {
 
       const expiresIn = expires ? parseInt(expires, 10) : 3600;
 
-      // Import storage config to check if using internal or external S3
       const { isInternalStorage } = await import("../../config/storage.config.js");
 
       let downloadUrl: string;
-
       if (isInternalStorage) {
-        // Internal storage: Use frontend proxy (much simpler!)
         downloadUrl = `/api/files/download?objectName=${encodeURIComponent(objectName)}`;
       } else {
-        // External S3: Use presigned URLs directly (more efficient)
         downloadUrl = await this.storageProvider.getPresignedGetUrl(objectName, expiresIn, fileName);
       }
 
@@ -107,35 +109,24 @@ export class S3StorageController {
     }
   }
 
-  /**
-   * Upload directly (for small files)
-   * Receives file and uploads to S3
-   */
   async upload(request: FastifyRequest, reply: FastifyReply) {
-    try {
-      // For large files, clients should use presigned URLs
-      // This is just for backward compatibility or small files
-
-      return reply.status(501).send({
-        error: "Not implemented",
-        message: "Use getUploadUrl endpoint for efficient uploads",
-      });
-    } catch (error) {
-      console.error("[S3] Error in upload:", error);
-      return reply.status(500).send({ error: "Upload failed" });
-    }
+    return reply.status(501).send({
+      error: "Not implemented",
+      message: "Use getUploadUrl endpoint for efficient uploads",
+    });
   }
 
-  /**
-   * Delete object from S3
-   */
   async deleteObject(request: FastifyRequest, reply: FastifyReply) {
     try {
+      const userId = getUserIdOrReply(request, reply);
+      if (!userId) return;
+
       const { objectName } = request.params as { objectName: string };
 
       if (!objectName) {
         return reply.status(400).send({ error: "objectName is required" });
       }
+      if (!assertOwnsObject(userId, objectName, reply)) return;
 
       await this.storageProvider.deleteObject(objectName);
 
@@ -149,16 +140,17 @@ export class S3StorageController {
     }
   }
 
-  /**
-   * Check if object exists
-   */
   async checkExists(request: FastifyRequest, reply: FastifyReply) {
     try {
+      const userId = getUserIdOrReply(request, reply);
+      if (!userId) return;
+
       const { objectName } = request.query as { objectName: string };
 
       if (!objectName) {
         return reply.status(400).send({ error: "objectName is required" });
       }
+      if (!assertOwnsObject(userId, objectName, reply)) return;
 
       const exists = await this.storageProvider.fileExists(objectName);
 

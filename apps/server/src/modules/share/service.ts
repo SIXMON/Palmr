@@ -4,7 +4,13 @@ import { prisma } from "../../shared/prisma";
 import { EmailService } from "../email/service";
 import { FolderService } from "../folder/service";
 import { UserService } from "../user/service";
-import { CreateShareInput, ShareResponseSchema, UpdateShareInput } from "./dto";
+import {
+  CreateShareInput,
+  PublicShareResponse,
+  PublicShareResponseSchema,
+  ShareResponseSchema,
+  UpdateShareInput,
+} from "./dto";
 import { IShareRepository, PrismaShareRepository } from "./repository";
 
 export class ShareService {
@@ -187,10 +193,14 @@ export class ShareService {
     return await this.formatShareResponse(shareWithRelations);
   }
 
-  async deleteShare(id: string) {
+  async deleteShare(id: string, userId: string) {
     const share = await this.shareRepository.findShareById(id);
     if (!share) {
       throw new Error("Share not found");
+    }
+
+    if (share.creatorId !== userId) {
+      throw new Error("Unauthorized to delete this share");
     }
 
     const deleted = await prisma.$transaction(async (tx) => {
@@ -257,22 +267,31 @@ export class ShareService {
     }
 
     if (fileIds.length > 0) {
-      const existingFiles = await this.shareRepository.findFilesByIds(fileIds);
+      // CRITICAL: filter by userId to prevent IDOR — a user must not be able
+      // to attach another user's files to their own share.
+      const existingFiles = await prisma.file.findMany({
+        where: { id: { in: fileIds }, userId },
+        select: { id: true },
+      });
       const notFoundFiles = fileIds.filter((id) => !existingFiles.some((file) => file.id === id));
 
       if (notFoundFiles.length > 0) {
-        throw new Error(`Files not found: ${notFoundFiles.join(", ")}`);
+        throw new Error(`Files not found or access denied: ${notFoundFiles.join(", ")}`);
       }
 
       await this.shareRepository.addFilesToShare(shareId, fileIds);
     }
 
     if (folderIds.length > 0) {
-      const existingFolders = await this.shareRepository.findFoldersByIds(folderIds);
+      // CRITICAL: same ownership check as for files (IDOR prevention).
+      const existingFolders = await prisma.folder.findMany({
+        where: { id: { in: folderIds }, userId },
+        select: { id: true },
+      });
       const notFoundFolders = folderIds.filter((id) => !existingFolders.some((folder) => folder.id === id));
 
       if (notFoundFolders.length > 0) {
-        throw new Error(`Folders not found: ${notFoundFolders.join(", ")}`);
+        throw new Error(`Folders not found or access denied: ${notFoundFolders.join(", ")}`);
       }
 
       await this.shareRepository.addFoldersToShare(shareId, folderIds);
@@ -374,25 +393,53 @@ export class ShareService {
     };
   }
 
-  async getShareByAlias(alias: string, password?: string) {
+  /**
+   * Public access via alias. Returns a PublicShareResponse that excludes
+   * sensitive fields (creatorId, recipients PII, objectName, userId on files/folders).
+   */
+  async getShareByAlias(alias: string, password?: string): Promise<PublicShareResponse> {
     const shareAlias = await prisma.shareAlias.findUnique({
       where: { alias },
-      include: {
-        share: {
-          include: {
-            security: true,
-            files: true,
-            recipients: true,
-          },
-        },
-      },
     });
 
     if (!shareAlias) {
       throw new Error("Share not found");
     }
 
-    return this.getShare(shareAlias.shareId, password);
+    const fullShare = await this.getShare(shareAlias.shareId, password);
+    return PublicShareResponseSchema.parse(this.toPublicShareResponse(fullShare));
+  }
+
+  private toPublicShareResponse(share: any): PublicShareResponse {
+    return {
+      id: share.id,
+      name: share.name,
+      description: share.description,
+      expiration: share.expiration,
+      views: share.views,
+      createdAt: share.createdAt,
+      updatedAt: share.updatedAt,
+      security: share.security,
+      files: (share.files || []).map((file: any) => ({
+        id: file.id,
+        name: file.name,
+        description: file.description,
+        extension: file.extension,
+        size: file.size,
+        createdAt: file.createdAt,
+        updatedAt: file.updatedAt,
+      })),
+      folders: (share.folders || []).map((folder: any) => ({
+        id: folder.id,
+        name: folder.name,
+        description: folder.description,
+        totalSize: folder.totalSize,
+        createdAt: folder.createdAt,
+        updatedAt: folder.updatedAt,
+        _count: folder._count,
+      })),
+      alias: share.alias,
+    };
   }
 
   async notifyRecipients(shareId: string, userId: string, shareLink: string) {

@@ -2,12 +2,15 @@
  * S3 Storage Routes
  *
  * Simple routes for S3-based storage using presigned URLs.
- * Much simpler than filesystem routes - no chunk management, no streaming.
+ * All endpoints require authentication and ownership of the objectName
+ * (which must be under `<userId>/...` prefix). For reverse-share uploads,
+ * use the dedicated reverse-share routes instead.
  */
 
 import { FastifyInstance } from "fastify";
 import { z } from "zod";
 
+import { requireAuth } from "../../shared/auth";
 import { S3StorageController } from "./controller";
 
 export async function s3StorageRoutes(app: FastifyInstance) {
@@ -17,6 +20,7 @@ export async function s3StorageRoutes(app: FastifyInstance) {
   app.post(
     "/s3/upload-url",
     {
+      preValidation: requireAuth,
       schema: {
         tags: ["S3 Storage"],
         operationId: "getS3UploadUrl",
@@ -33,6 +37,9 @@ export async function s3StorageRoutes(app: FastifyInstance) {
             expiresIn: z.number(),
             message: z.string(),
           }),
+          400: z.object({ error: z.string() }),
+          401: z.object({ error: z.string() }),
+          403: z.object({ error: z.string() }),
         },
       },
     },
@@ -43,6 +50,7 @@ export async function s3StorageRoutes(app: FastifyInstance) {
   app.get(
     "/s3/download-url",
     {
+      preValidation: requireAuth,
       schema: {
         tags: ["S3 Storage"],
         operationId: "getS3DownloadUrl",
@@ -60,6 +68,10 @@ export async function s3StorageRoutes(app: FastifyInstance) {
             expiresIn: z.number(),
             message: z.string(),
           }),
+          400: z.object({ error: z.string() }),
+          401: z.object({ error: z.string() }),
+          403: z.object({ error: z.string() }),
+          404: z.object({ error: z.string() }),
         },
       },
     },
@@ -70,6 +82,7 @@ export async function s3StorageRoutes(app: FastifyInstance) {
   app.delete(
     "/s3/object/:objectName",
     {
+      preValidation: requireAuth,
       schema: {
         tags: ["S3 Storage"],
         operationId: "deleteS3Object",
@@ -82,6 +95,10 @@ export async function s3StorageRoutes(app: FastifyInstance) {
             message: z.string(),
             objectName: z.string(),
           }),
+          400: z.object({ error: z.string() }),
+          401: z.object({ error: z.string() }),
+          403: z.object({ error: z.string() }),
+          404: z.object({ error: z.string() }),
         },
       },
     },
@@ -92,6 +109,7 @@ export async function s3StorageRoutes(app: FastifyInstance) {
   app.get(
     "/s3/exists",
     {
+      preValidation: requireAuth,
       schema: {
         tags: ["S3 Storage"],
         operationId: "checkS3ObjectExists",
@@ -104,6 +122,9 @@ export async function s3StorageRoutes(app: FastifyInstance) {
             exists: z.boolean(),
             objectName: z.string(),
           }),
+          400: z.object({ error: z.string() }),
+          401: z.object({ error: z.string() }),
+          403: z.object({ error: z.string() }),
         },
       },
     },

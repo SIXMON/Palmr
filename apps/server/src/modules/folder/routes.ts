@@ -1,6 +1,7 @@
-import { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { FastifyInstance } from "fastify";
 import { z } from "zod";
 
+import { requireAuth } from "../../shared/auth";
 import { FolderController } from "./controller";
 import {
   CheckFolderSchema,
@@ -14,18 +15,12 @@ import {
 export async function folderRoutes(app: FastifyInstance) {
   const folderController = new FolderController();
 
-  const preValidation = async (request: FastifyRequest, reply: FastifyReply) => {
-    try {
-      await request.jwtVerify();
-    } catch (err) {
-      console.error(err);
-      reply.status(401).send({ error: "Token inválido ou ausente." });
-    }
-  };
+  const preValidation = requireAuth;
 
   app.post(
     "/folders",
     {
+      preValidation,
       schema: {
         tags: ["Folder"],
         operationId: "registerFolder",

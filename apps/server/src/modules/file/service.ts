@@ -21,7 +21,7 @@ export class FileService {
     try {
       await this.storageProvider.deleteObject(objectName);
     } catch (err) {
-      console.error("Erro no removeObject:", err);
+      console.error("Error in removeObject:", err);
       throw err;
     }
   }

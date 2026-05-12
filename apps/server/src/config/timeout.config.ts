@@ -62,12 +62,14 @@ export function getTimeoutForFileSize(fileSizeBytes: number) {
  */
 export const envTimeoutOverrides = {
   keepAliveTimeout: process.env.KEEP_ALIVE_TIMEOUT
-    ? parseInt(process.env.KEEP_ALIVE_TIMEOUT)
+    ? parseInt(process.env.KEEP_ALIVE_TIMEOUT, 10)
     : timeoutConfig.connection.keepAlive,
 
-  requestTimeout: process.env.REQUEST_TIMEOUT ? parseInt(process.env.REQUEST_TIMEOUT) : timeoutConfig.request.timeout,
+  requestTimeout: process.env.REQUEST_TIMEOUT
+    ? parseInt(process.env.REQUEST_TIMEOUT, 10)
+    : timeoutConfig.request.timeout,
 
   tokenExpiration: process.env.TOKEN_EXPIRATION
-    ? parseInt(process.env.TOKEN_EXPIRATION)
+    ? parseInt(process.env.TOKEN_EXPIRATION, 10)
     : timeoutConfig.token.expiration,
 };

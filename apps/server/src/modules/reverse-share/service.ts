@@ -493,7 +493,7 @@ export class ReverseShareService {
     }
 
     const fileName = file.name;
-    const expires = parseInt(env.PRESIGNED_URL_EXPIRATION);
+    const expires = parseInt(env.PRESIGNED_URL_EXPIRATION, 10);
 
     // Import storage config to check if using internal or external S3
     const { isInternalStorage } = await import("../../config/storage.config.js");

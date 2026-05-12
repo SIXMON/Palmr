@@ -19,6 +19,15 @@ import { storageRoutes } from "./modules/storage/routes";
 import { twoFactorRoutes } from "./modules/two-factor/routes";
 import { userRoutes } from "./modules/user/routes";
 
+// Global BigInt JSON support. Prisma returns `file.size` and `maxFileSize`
+// as bigint, and `JSON.stringify({ x: 1n })` throws by default. Serialise as
+// string so the wire format is lossless even past 2^53. Callers that need a
+// number for arithmetic still use `Number(...)` / `BigInt(...)` explicitly.
+
+(BigInt.prototype as any).toJSON = function () {
+  return this.toString();
+};
+
 if (typeof globalThis.crypto === "undefined") {
   globalThis.crypto = crypto.webcrypto as any;
 }

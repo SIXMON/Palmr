@@ -105,7 +105,7 @@ export class FileController {
 
       // Generate unique object name
       const objectName = `${userId}/${Date.now()}-${Math.random().toString(36).substring(7)}-${filename}.${extension}`;
-      const expires = parseInt(env.PRESIGNED_URL_EXPIRATION);
+      const expires = parseInt(env.PRESIGNED_URL_EXPIRATION, 10);
 
       const url = await this.fileService.getPresignedPutUrl(objectName, expires);
 
@@ -735,12 +735,12 @@ export class FileController {
         return reply.status(400).send({ error: "uploadId, objectName, and partNumber are required" });
       }
 
-      const partNum = parseInt(partNumber);
+      const partNum = parseInt(partNumber, 10);
       if (isNaN(partNum) || partNum < 1 || partNum > 10000) {
         return reply.status(400).send({ error: "partNumber must be between 1 and 10000" });
       }
 
-      const expires = parseInt(env.PRESIGNED_URL_EXPIRATION);
+      const expires = parseInt(env.PRESIGNED_URL_EXPIRATION, 10);
 
       const url = await this.fileService.getPresignedPartUrl(objectName, uploadId, partNum, expires);
 

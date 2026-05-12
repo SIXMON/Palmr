@@ -39,7 +39,9 @@ export class AuthProvidersService {
   private pendingStates = new Map<string, PendingState>();
 
   constructor() {
-    setInterval(() => this.cleanupExpiredStates(), CLEANUP_INTERVAL);
+    // .unref() so the timer doesn't keep the process alive on shutdown;
+    // node will eventually call clearInterval when the process exits.
+    setInterval(() => this.cleanupExpiredStates(), CLEANUP_INTERVAL).unref?.();
   }
 
   private buildBaseUrl(requestContext?: RequestContextService): string {
@@ -151,7 +153,50 @@ export class AuthProvidersService {
     return `${baseUrl}${path}`;
   }
 
+  /**
+   * Anti-SSRF guard for OIDC discovery / token / userInfo URLs.
+   * Refuse non-http(s), private/loopback/link-local addresses, and any host
+   * resolving to an internal IP from environments where we don't expect to
+   * call internal services. This is best-effort host-name filtering; DNS
+   * rebinding can still surprise us, but the surface is narrower than nothing.
+   */
+  private assertExternalUrl(rawUrl: string): URL {
+    let url: URL;
+    try {
+      url = new URL(rawUrl);
+    } catch {
+      throw new Error("Invalid provider URL");
+    }
+    if (url.protocol !== "https:" && url.protocol !== "http:") {
+      throw new Error("Provider URL must use http or https");
+    }
+    const host = url.hostname.toLowerCase();
+    if (
+      host === "localhost" ||
+      host.endsWith(".localhost") ||
+      host === "0.0.0.0" ||
+      host.startsWith("127.") ||
+      host.startsWith("10.") ||
+      host.startsWith("192.168.") ||
+      host.startsWith("169.254.") ||
+      host === "metadata.google.internal" ||
+      host === "::1" ||
+      host.startsWith("[fc") ||
+      host.startsWith("[fd") ||
+      /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(host)
+    ) {
+      throw new Error("Provider URL must point to a public host");
+    }
+    return url;
+  }
+
   private async attemptDiscovery(issuerUrl: string): Promise<ProviderEndpoints | null> {
+    try {
+      this.assertExternalUrl(issuerUrl);
+    } catch (err) {
+      console.warn("[oidc] Refusing discovery against non-public issuerUrl:", (err as Error).message);
+      return null;
+    }
     for (const discoveryPath of DISCOVERY_PATHS) {
       try {
         const discoveryUrl = `${issuerUrl}${discoveryPath}`;
@@ -533,10 +578,12 @@ export class AuthProvidersService {
       headers["Authorization"] = `Basic ${auth}`;
     }
 
+    this.assertExternalUrl(endpoints.tokenEndpoint);
     const tokenResponse = await fetch(endpoints.tokenEndpoint, {
       method: "POST",
       headers,
       body,
+      signal: AbortSignal.timeout(15000),
     });
 
     if (!tokenResponse.ok) {
@@ -554,7 +601,9 @@ export class AuthProvidersService {
   }
 
   private async fetchUserInfo(tokens: TokenResponse, endpoints: any): Promise<any> {
+    this.assertExternalUrl(endpoints.userInfoEndpoint);
     const userInfoResponse = await fetch(endpoints.userInfoEndpoint, {
+      signal: AbortSignal.timeout(15000),
       headers: {
         Authorization: `Bearer ${tokens.access_token}`,
         Accept: "application/json",
@@ -595,7 +644,9 @@ export class AuthProvidersService {
 
   private async fetchEmailFromEndpoint(endpoint: string, accessToken: string): Promise<string | null> {
     try {
+      this.assertExternalUrl(endpoint);
       const response = await fetch(endpoint, {
+        signal: AbortSignal.timeout(15000),
         headers: {
           Authorization: `Bearer ${accessToken}`,
           Accept: "application/json",
@@ -790,6 +841,28 @@ export class AuthProvidersService {
       .some((allowed: string) => domain === allowed);
   }
 
+  /**
+   * Pick a username derived from the email local-part, suffixing a counter
+   * if needed so two providers offering `john@a.com` and `john@b.com`
+   * don't both try to register username "john" (which would crash the second
+   * one on the unique constraint).
+   */
+  private async generateUniqueUsername(seed: string): Promise<string> {
+    const base =
+      seed
+        .toLowerCase()
+        .replace(/[^a-z0-9._-]/g, "_")
+        .slice(0, 24) || "user";
+    let candidate = base;
+    for (let i = 1; i < 100; i++) {
+      const existing = await prisma.user.findUnique({ where: { username: candidate }, select: { id: true } });
+      if (!existing) return candidate;
+      candidate = `${base}${i}`;
+    }
+    // Extremely unlikely; fall back to a random suffix.
+    return `${base}-${crypto.randomBytes(3).toString("hex")}`;
+  }
+
   private async createNewUserWithProvider(
     userInfo: ProviderUserInfo,
     providerId: string,
@@ -799,11 +872,12 @@ export class AuthProvidersService {
     const { firstName, lastName } = this.generateUserNames(userInfo);
 
     const isAdmin = this.shouldBeAdminFromProvider(provider, userInfo.email);
+    const username = await this.generateUniqueUsername(userInfo.email.split("@")[0]);
 
     return await prisma.user.create({
       data: {
         email: userInfo.email,
-        username: userInfo.email.split("@")[0],
+        username,
         firstName,
         lastName,
         image: userInfo.avatar || null,

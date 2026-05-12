@@ -1,5 +1,6 @@
 import { FastifyReply, FastifyRequest } from "fastify";
 
+import { replyWithError } from "../../shared/errors";
 import { AvatarService } from "./avatar.service";
 import { createRegisterUserSchema, UpdateUserImageSchema, UpdateUserSchema } from "./dto";
 import { UserService } from "./service";
@@ -14,8 +15,8 @@ export class UserController {
       const input = schema.parse(request.body);
       const user = await this.userService.register(input);
       return reply.status(201).send({ user, message: "User created successfully" });
-    } catch (error: any) {
-      return reply.status(400).send({ error: error.message });
+    } catch (error) {
+      return replyWithError(reply, error);
     }
   }
 
@@ -23,8 +24,8 @@ export class UserController {
     try {
       const users = await this.userService.listUsers();
       return reply.send(users);
-    } catch (error: any) {
-      return reply.status(400).send({ error: error.message });
+    } catch (error) {
+      return replyWithError(reply, error);
     }
   }
 
@@ -33,8 +34,8 @@ export class UserController {
       const { id } = request.params as { id: string };
       const user = await this.userService.getUserById(id);
       return reply.send(user);
-    } catch (error: any) {
-      return reply.status(404).send({ error: error.message });
+    } catch (error) {
+      return replyWithError(reply, error);
     }
   }
 
@@ -42,12 +43,12 @@ export class UserController {
     try {
       const input = UpdateUserSchema.parse(request.body);
       // Strip isAdmin: privilege escalation must go through a dedicated route.
-
       const { id, isAdmin: _ignoredIsAdmin, ...updateData } = input;
+      void _ignoredIsAdmin;
       const updatedUser = await this.userService.updateUser(id, updateData);
       return reply.send(updatedUser);
-    } catch (error: any) {
-      return reply.status(400).send({ error: error.message });
+    } catch (error) {
+      return replyWithError(reply, error);
     }
   }
 
@@ -56,8 +57,8 @@ export class UserController {
       const { id } = request.params as { id: string };
       const user = await this.userService.activateUser(id);
       return reply.send(user);
-    } catch (error: any) {
-      return reply.status(400).send({ error: error.message });
+    } catch (error) {
+      return replyWithError(reply, error);
     }
   }
 
@@ -66,8 +67,8 @@ export class UserController {
       const { id } = request.params as { id: string };
       const user = await this.userService.deactivateUser(id);
       return reply.send(user);
-    } catch (error: any) {
-      return reply.status(400).send({ error: error.message });
+    } catch (error) {
+      return replyWithError(reply, error);
     }
   }
 
@@ -76,8 +77,8 @@ export class UserController {
       const { id } = request.params as { id: string };
       const user = await this.userService.deleteUser(id);
       return reply.send(user);
-    } catch (error: any) {
-      return reply.status(400).send({ error: error.message });
+    } catch (error) {
+      return replyWithError(reply, error);
     }
   }
 
@@ -87,8 +88,8 @@ export class UserController {
       const { image } = UpdateUserImageSchema.parse(request.body);
       const updatedUser = await this.userService.updateUser(id, { image });
       return reply.send(updatedUser);
-    } catch (error: any) {
-      return reply.status(400).send({ error: error.message });
+    } catch (error) {
+      return replyWithError(reply, error);
     }
   }
 
@@ -126,9 +127,9 @@ export class UserController {
       const updatedUser = await this.userService.updateUserImage(userId, base64Image);
 
       return reply.send(updatedUser);
-    } catch (error: any) {
+    } catch (error) {
       console.error("Upload error:", error);
-      return reply.status(400).send({ error: error.message });
+      return replyWithError(reply, error, "Failed to upload avatar");
     }
   }
 
@@ -142,8 +143,8 @@ export class UserController {
       await this.avatarService.deleteAvatar(userId);
       const updatedUser = await this.userService.getUserById(userId);
       return reply.send(updatedUser);
-    } catch (error: any) {
-      return reply.status(400).send({ error: error.message });
+    } catch (error) {
+      return replyWithError(reply, error, "Failed to remove avatar");
     }
   }
 }

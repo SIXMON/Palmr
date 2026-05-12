@@ -3,7 +3,7 @@ import { z } from "zod";
 
 import { requireAdmin } from "../../shared/auth";
 import { AuthProvidersController } from "./controller";
-import { CreateAuthProviderSchema, UpdateProvidersOrderSchema } from "./dto";
+import { CreateAuthProviderSchema, UpdateAuthProviderSchema, UpdateProvidersOrderSchema } from "./dto";
 
 export async function authProvidersRoutes(fastify: FastifyInstance) {
   const authProvidersController = new AuthProvidersController();
@@ -162,7 +162,10 @@ export async function authProvidersRoutes(fastify: FastifyInstance) {
         params: z.object({
           id: z.string(),
         }),
-        body: z.any(),
+        // Official providers go through a stricter sanitiser in the
+        // controller, but we still validate the wire format with the
+        // generic update schema so unknown fields can't be smuggled in.
+        body: UpdateAuthProviderSchema,
         response: {
           200: z.object({
             success: z.boolean(),

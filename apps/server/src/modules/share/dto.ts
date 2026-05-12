@@ -11,10 +11,14 @@ export const CreateShareSchema = z
       })
       .optional(),
     files: z.array(z.string()).optional().describe("The file IDs"),
-    folders: z.array(z.string()).optional().describe("The folder IDs"),
-    password: z.string().optional().describe("The share password"),
-    maxViews: z.number().optional().nullable().describe("The maximum number of views"),
-    recipients: z.array(z.string().email()).optional().describe("The recipient emails"),
+    folders: z.array(z.string()).max(1000, "Too many folders").optional().describe("The folder IDs"),
+    password: z.string().min(1).max(255).optional().describe("The share password"),
+    maxViews: z.number().int().min(1).max(1_000_000).optional().nullable().describe("The maximum number of views"),
+    recipients: z
+      .array(z.string().email())
+      .max(50, "Too many recipients (max 50)")
+      .optional()
+      .describe("The recipient emails"),
   })
   .refine(
     (data) => {
@@ -29,12 +33,12 @@ export const CreateShareSchema = z
 
 export const UpdateShareSchema = z.object({
   id: z.string(),
-  name: z.string().optional(),
-  description: z.string().optional(),
+  name: z.string().min(1).max(255).optional(),
+  description: z.string().max(2000).optional(),
   expiration: z.string().datetime().optional(),
-  password: z.string().optional(),
-  maxViews: z.number().optional().nullable(),
-  recipients: z.array(z.string().email()).optional(),
+  password: z.string().min(1).max(255).optional(),
+  maxViews: z.number().int().min(1).max(1_000_000).optional().nullable(),
+  recipients: z.array(z.string().email()).max(50, "Too many recipients (max 50)").optional(),
 });
 
 export const ShareAliasResponseSchema = z.object({
@@ -123,15 +127,19 @@ export const UpdateShareItemsSchema = z
   );
 
 export const UpdateShareRecipientsSchema = z.object({
-  emails: z.array(z.string().email("Invalid email format").describe("The recipient emails")),
+  emails: z
+    .array(z.string().email("Invalid email format").describe("The recipient emails"))
+    .max(50, "Too many recipients (max 50)"),
 });
 
 export const CreateShareAliasSchema = z.object({
   shareId: z.string().describe("The share ID"),
   alias: z
     .string()
-    .regex(/^[a-zA-Z0-9]+$/, "Alias must contain only letters and numbers")
-    .min(3, "Alias must be at least 3 characters long")
+    .regex(/^[a-zA-Z0-9-]+$/, "Alias must contain only letters, numbers, and hyphens")
+    // 8-char minimum makes brute-forcing a guessable alias considerably harder
+    // (was 3, which was trivially bruteforce-able for any popular instance).
+    .min(8, "Alias must be at least 8 characters long")
     .max(30, "Alias must not exceed 30 characters")
     .describe("The custom alias for the share"),
 });

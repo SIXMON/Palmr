@@ -21,7 +21,7 @@ export async function userRoutes(app: FastifyInstance) {
       lastName: z.string().min(1).describe("User last name"),
       username: z.string().min(3).describe("User username"),
       email: z.string().email().describe("User email"),
-      image: z.string().optional().describe("User profile image URL"),
+      image: z.string().url().optional().describe("User profile image URL"),
       password: passwordSchema.describe("User password"),
     });
   };

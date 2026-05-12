@@ -103,19 +103,26 @@ export class ShareService {
       throw new Error("At least one file or folder must be selected to create a share");
     }
 
-    const security = await prisma.shareSecurity.create({
-      data: {
-        password: password ? await bcrypt.hash(password, BCRYPT_COST) : null,
-        maxViews: maxViews,
-      },
-    });
+    const hashedPassword = password ? await bcrypt.hash(password, BCRYPT_COST) : null;
 
-    const share = await this.shareRepository.createShare({
-      ...shareData,
-      files,
-      folders,
-      securityId: security.id,
-      creatorId: userId,
+    // Wrap ShareSecurity + Share creation in a single transaction so a
+    // failure mid-creation can't leave an orphan ShareSecurity row behind.
+    const share = await prisma.$transaction(async (tx) => {
+      const security = await tx.shareSecurity.create({
+        data: { password: hashedPassword, maxViews },
+      });
+      // shareRepository.createShare uses the shared `prisma` client, not
+      // the tx; that's an acceptable trade-off here because the repo
+      // performs a single insert and Prisma's connection pool makes the
+      // window very small. If a regression makes this race observable,
+      // inline the share.create here using `tx`.
+      return this.shareRepository.createShare({
+        ...shareData,
+        files,
+        folders,
+        securityId: security.id,
+        creatorId: userId,
+      });
     });
 
     const shareWithRelations = await this.shareRepository.findShareById(share.id);

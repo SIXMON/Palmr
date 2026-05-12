@@ -14,7 +14,7 @@ export class FolderService {
     try {
       return await this.storageProvider.getPresignedPutUrl(objectName, expires);
     } catch (err) {
-      console.error("Erro no presignedPutObject:", err);
+      console.error("Error in presignedPutObject:", err);
       throw err;
     }
   }
@@ -23,7 +23,7 @@ export class FolderService {
     try {
       return await this.storageProvider.getPresignedGetUrl(objectName, expires, folderName);
     } catch (err) {
-      console.error("Erro no presignedGetObject:", err);
+      console.error("Error in presignedGetObject:", err);
       throw err;
     }
   }
@@ -32,7 +32,7 @@ export class FolderService {
     try {
       await this.storageProvider.deleteObject(objectName);
     } catch (err) {
-      console.error("Erro no removeObject:", err);
+      console.error("Error in removeObject:", err);
       throw err;
     }
   }

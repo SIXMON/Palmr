@@ -453,7 +453,7 @@ export async function reverseShareRoutes(app: FastifyInstance) {
           alias: z
             .string()
             .regex(/^[a-zA-Z0-9-]+$/, "Alias must contain only letters, numbers, and hyphens")
-            .min(3, "Alias must be at least 3 characters long")
+            .min(8, "Alias must be at least 8 characters long")
             .max(30, "Alias must not exceed 30 characters"),
         }),
         response: {

@@ -277,8 +277,8 @@ export async function shareRoutes(app: FastifyInstance) {
         body: z.object({
           alias: z
             .string()
-            .regex(/^[a-zA-Z0-9]+$/, "Alias must contain only letters and numbers")
-            .min(3, "Alias must be at least 3 characters long")
+            .regex(/^[a-zA-Z0-9-]+$/, "Alias must contain only letters, numbers, and hyphens")
+            .min(8, "Alias must be at least 8 characters long")
             .max(30, "Alias must not exceed 30 characters"),
         }),
         response: {

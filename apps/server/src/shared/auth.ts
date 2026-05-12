@@ -48,7 +48,22 @@ export async function requireAdmin(request: any, reply: any) {
     if (isJtiRevoked(request.user?.jti)) {
       return reply.status(401).send({ error: "Session expired. Please log in again." });
     }
-    if (!request.user?.isAdmin) {
+
+    // Live re-check from the DB. The JWT carries isAdmin from the moment
+    // the user logged in, so a demoted or deactivated admin would otherwise
+    // keep admin access until their token naturally expires.
+    const userId = request.user?.userId;
+    if (!userId) {
+      return reply.status(401).send({ error: "Unauthorized" });
+    }
+    const dbUser = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { isAdmin: true, isActive: true },
+    });
+    if (!dbUser || !dbUser.isActive) {
+      return reply.status(401).send({ error: "Account is inactive" });
+    }
+    if (!dbUser.isAdmin) {
       return reply.status(403).send({ error: "Access restricted to administrators" });
     }
   } catch {

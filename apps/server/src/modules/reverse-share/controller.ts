@@ -545,7 +545,7 @@ export class ReverseShareController {
         return reply.status(400).send({ error: "uploadId, objectName, and partNumber are required" });
       }
 
-      const partNum = parseInt(partNumber);
+      const partNum = parseInt(partNumber, 10);
       if (isNaN(partNum) || partNum < 1 || partNum > 10000) {
         return reply.status(400).send({ error: "partNumber must be between 1 and 10000" });
       }

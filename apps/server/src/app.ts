@@ -58,7 +58,11 @@ export async function buildApp() {
   const app = fastify({
     ajv: {
       customOptions: {
-        removeAdditional: false,
+        // Strip unknown body/query/params fields before they reach handlers.
+        // Combined with Zod validators on every route, this makes
+        // mass-assignment via extra fields (e.g. sneaking `isAdmin: true`
+        // through a route that doesn't expect it) a no-op.
+        removeAdditional: true,
       },
     },
     logger: {

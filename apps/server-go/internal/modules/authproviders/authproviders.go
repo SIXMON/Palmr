@@ -26,6 +26,7 @@ import (
 	"encoding/hex"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -69,10 +70,14 @@ type Handler struct {
 	SecureSite bool
 	CookieTTL  time.Duration
 
-	// state is the in-memory CSRF store for OAuth state values. Plain map,
-	// fine for single-instance deployments — swap to Redis if you ever go
-	// horizontal.
-	state map[string]stateEntry
+	// state is the in-memory CSRF store for OAuth state values, guarded
+	// by stateMu. Plain map, fine for single-instance deployments — swap
+	// to Redis if you ever go horizontal. Without the mutex two
+	// concurrent Authorize calls (or one Authorize + a Callback for an
+	// older state) race the map and can crash the process under the
+	// Go runtime's concurrent-map-access detector.
+	stateMu sync.RWMutex
+	state   map[string]stateEntry
 }
 
 type stateEntry struct {
@@ -83,6 +88,29 @@ type stateEntry struct {
 
 func New(db *sqlx.DB, signer *auth.Signer, secure bool, ttl time.Duration) *Handler {
 	return &Handler{DB: db, Signer: signer, SecureSite: secure, CookieTTL: ttl, state: map[string]stateEntry{}}
+}
+
+// StartGC fires a ticker that purges expired OAuth state entries every
+// `every` interval. Without this the state map would only get pruned
+// when a new Authorize request comes in — if nobody starts an OAuth
+// flow for hours the abandoned entries linger. Call once at boot;
+// caller's context cancellation stops the goroutine.
+func (h *Handler) StartGC(ctx context.Context, every time.Duration) {
+	if every <= 0 {
+		every = 5 * time.Minute
+	}
+	go func() {
+		t := time.NewTicker(every)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				h.gcState()
+			}
+		}
+	}()
 }
 
 func Register(api huma.API, h *Handler) {
@@ -110,6 +138,8 @@ type APListOutput struct{ Body struct{ Success bool `json:"success"`; Data []Pro
 
 func (h *Handler) ListEnabled(ctx context.Context, _ *struct{}) (*APListOutput, error) {
 	out := &APListOutput{}
+	// Pre-initialise so an empty result serialises as `[]`, not `null`.
+	out.Body.Data = []Provider{}
 	_ = h.DB.SelectContext(ctx, &out.Body.Data,
 		`SELECT id, name, displayName, type, icon, enabled, issuerUrl, clientId, redirectUri, scope,
 		        authorizationEndpoint, tokenEndpoint, userInfoEndpoint, metadata, autoRegister, adminEmailDomains, sortOrder, createdAt, updatedAt
@@ -123,6 +153,8 @@ func (h *Handler) ListAll(ctx context.Context, _ *struct{}) (*APListOutput, erro
 		return nil, apperr.Unauthorized(err.Error())
 	}
 	out := &APListOutput{}
+	// Pre-initialise so an empty result serialises as `[]`, not `null`.
+	out.Body.Data = []Provider{}
 	_ = h.DB.SelectContext(ctx, &out.Body.Data, `
 		SELECT id, name, displayName, type, icon, enabled, issuerUrl, clientId, redirectUri, scope,
 		       authorizationEndpoint, tokenEndpoint, userInfoEndpoint, metadata, autoRegister, adminEmailDomains, sortOrder, createdAt, updatedAt
@@ -131,14 +163,168 @@ func (h *Handler) ListAll(ctx context.Context, _ *struct{}) (*APListOutput, erro
 	return out, nil
 }
 
-type APCreateInput struct{ Body Provider }
-type APSingleOutput struct{ Body struct{ Provider Provider `json:"provider"` } }
+// APCreateBody is the request shape for POST /auth/providers. Only the
+// fields the frontend's NewProvider type sends are required; everything
+// else is optional (pointer or *bool/*int). We can't reuse the DB
+// Provider struct here for two reasons:
+//
+//   1. Its scalar fields (Name, Type, Enabled, AutoRegister, SortOrder)
+//      are non-pointer non-omitempty, so huma's generated schema marks
+//      them required — even AutoRegister and SortOrder which the admin
+//      UI never sends.
+//   2. Its ClientSecret carries `json:"-"` to hide it on output, which
+//      also blocks deserialization on input.
+type APCreateBody struct {
+	Name                  string  `json:"name" required:"true"`
+	DisplayName           string  `json:"displayName" required:"true"`
+	Type                  string  `json:"type" required:"true"`
+	Icon                  *string `json:"icon,omitempty"`
+	Enabled               *bool   `json:"enabled,omitempty"`
+	IssuerURL             *string `json:"issuerUrl,omitempty"`
+	ClientID              string  `json:"clientId" required:"true"`
+	ClientSecret          string  `json:"clientSecret" required:"true"`
+	RedirectURI           *string `json:"redirectUri,omitempty"`
+	Scope                 *string `json:"scope,omitempty"`
+	AuthorizationEndpoint *string `json:"authorizationEndpoint,omitempty"`
+	TokenEndpoint         *string `json:"tokenEndpoint,omitempty"`
+	UserInfoEndpoint      *string `json:"userInfoEndpoint,omitempty"`
+	Metadata              *string `json:"metadata,omitempty"`
+	AutoRegister          *bool   `json:"autoRegister,omitempty"`
+	AdminEmailDomains     *string `json:"adminEmailDomains,omitempty"`
+	SortOrder             *int    `json:"sortOrder,omitempty"`
+}
+
+// APUpdateBody is the request shape for PUT /auth/providers/{id}. All
+// fields are optional — unset fields fall back to whatever the existing
+// row already has, so the admin UI can edit one attribute without
+// re-sending the rest (in particular, ClientSecret stays put when the
+// admin leaves the field empty).
+type APUpdateBody struct {
+	Name                  *string `json:"name,omitempty"`
+	DisplayName           *string `json:"displayName,omitempty"`
+	Type                  *string `json:"type,omitempty"`
+	Icon                  *string `json:"icon,omitempty"`
+	Enabled               *bool   `json:"enabled,omitempty"`
+	IssuerURL             *string `json:"issuerUrl,omitempty"`
+	ClientID              *string `json:"clientId,omitempty"`
+	ClientSecret          *string `json:"clientSecret,omitempty"`
+	RedirectURI           *string `json:"redirectUri,omitempty"`
+	Scope                 *string `json:"scope,omitempty"`
+	AuthorizationEndpoint *string `json:"authorizationEndpoint,omitempty"`
+	TokenEndpoint         *string `json:"tokenEndpoint,omitempty"`
+	UserInfoEndpoint      *string `json:"userInfoEndpoint,omitempty"`
+	Metadata              *string `json:"metadata,omitempty"`
+	AutoRegister          *bool   `json:"autoRegister,omitempty"`
+	AdminEmailDomains     *string `json:"adminEmailDomains,omitempty"`
+	SortOrder             *int    `json:"sortOrder,omitempty"`
+}
+
+type APCreateInput struct{ Body APCreateBody }
+
+// APSingleOutput matches the frontend's `AuthProviderResponse = ApiResponse<AuthProvider>`
+// envelope — i.e. `{ success: true, data: AuthProvider }`. The whole settings UI
+// branches on `response.data.success`, so omitting that field makes successful
+// 200s look like failures and triggers the "update failed" toast.
+type APSingleOutput struct {
+	Body struct {
+		Success bool     `json:"success"`
+		Data    Provider `json:"data"`
+	}
+}
+
+func (b APCreateBody) toProvider() Provider {
+	cid, cs := b.ClientID, b.ClientSecret
+	p := Provider{
+		Name:         b.Name,
+		DisplayName:  b.DisplayName,
+		Type:         b.Type,
+		Icon:         b.Icon,
+		IssuerURL:    b.IssuerURL,
+		ClientID:     &cid,
+		ClientSecret: &cs,
+		RedirectURI:  b.RedirectURI,
+		Scope:        b.Scope,
+		AuthorizationEndpoint: b.AuthorizationEndpoint,
+		TokenEndpoint:         b.TokenEndpoint,
+		UserInfoEndpoint:      b.UserInfoEndpoint,
+		Metadata:              b.Metadata,
+		AdminEmailDomains:     b.AdminEmailDomains,
+	}
+	if b.Enabled != nil {
+		p.Enabled = *b.Enabled
+	}
+	if b.AutoRegister != nil {
+		p.AutoRegister = *b.AutoRegister
+	}
+	if b.SortOrder != nil {
+		p.SortOrder = *b.SortOrder
+	}
+	return p
+}
+
+func (b APUpdateBody) applyTo(p *Provider) {
+	if b.Name != nil {
+		p.Name = *b.Name
+	}
+	if b.DisplayName != nil {
+		p.DisplayName = *b.DisplayName
+	}
+	if b.Type != nil {
+		p.Type = *b.Type
+	}
+	if b.Icon != nil {
+		p.Icon = b.Icon
+	}
+	if b.Enabled != nil {
+		p.Enabled = *b.Enabled
+	}
+	if b.IssuerURL != nil {
+		p.IssuerURL = b.IssuerURL
+	}
+	if b.ClientID != nil {
+		p.ClientID = b.ClientID
+	}
+	// Treat empty clientSecret as "don't change" — the admin UI sends an
+	// empty string when the user hasn't typed a new value, and we don't
+	// want to wipe the stored secret in that case.
+	if b.ClientSecret != nil && *b.ClientSecret != "" {
+		s := *b.ClientSecret
+		p.ClientSecret = &s
+	}
+	if b.RedirectURI != nil {
+		p.RedirectURI = b.RedirectURI
+	}
+	if b.Scope != nil {
+		p.Scope = b.Scope
+	}
+	if b.AuthorizationEndpoint != nil {
+		p.AuthorizationEndpoint = b.AuthorizationEndpoint
+	}
+	if b.TokenEndpoint != nil {
+		p.TokenEndpoint = b.TokenEndpoint
+	}
+	if b.UserInfoEndpoint != nil {
+		p.UserInfoEndpoint = b.UserInfoEndpoint
+	}
+	if b.Metadata != nil {
+		p.Metadata = b.Metadata
+	}
+	if b.AutoRegister != nil {
+		p.AutoRegister = *b.AutoRegister
+	}
+	if b.AdminEmailDomains != nil {
+		p.AdminEmailDomains = b.AdminEmailDomains
+	}
+	if b.SortOrder != nil {
+		p.SortOrder = *b.SortOrder
+	}
+}
 
 func (h *Handler) Create(ctx context.Context, in *APCreateInput) (*APSingleOutput, error) {
 	if _, err := auth.EnsureAdmin(ctx, h.DB); err != nil {
 		return nil, apperr.Unauthorized(err.Error())
 	}
-	p := in.Body
+	p := in.Body.toProvider()
 	p.ID = uuid.NewString()
 	now := time.Now().UTC()
 	p.CreatedAt = dbtypes.PrismaTime{Time: now}
@@ -154,20 +340,30 @@ func (h *Handler) Create(ctx context.Context, in *APCreateInput) (*APSingleOutpu
 		return nil, apperr.Internal("create provider: " + err.Error())
 	}
 	out := &APSingleOutput{}
-	out.Body.Provider = p
+	out.Body.Success = true
+	out.Body.Data = p
 	return out, nil
 }
 
 type APUpdateInput struct {
 	ID   string `path:"id"`
-	Body Provider
+	Body APUpdateBody
 }
 
 func (h *Handler) Update(ctx context.Context, in *APUpdateInput) (*APSingleOutput, error) {
 	if _, err := auth.EnsureAdmin(ctx, h.DB); err != nil {
 		return nil, apperr.Unauthorized(err.Error())
 	}
-	p := in.Body
+	// Load the existing row first so unset fields fall back to current
+	// values (partial update semantics).
+	var p Provider
+	if err := h.DB.GetContext(ctx, &p, `
+		SELECT id, name, displayName, type, icon, enabled, issuerUrl, clientId, clientSecret, redirectUri, scope,
+		       authorizationEndpoint, tokenEndpoint, userInfoEndpoint, metadata, autoRegister, adminEmailDomains, sortOrder, createdAt, updatedAt
+		FROM auth_providers WHERE id = ?`, in.ID); err != nil {
+		return nil, apperr.NotFound("provider not found")
+	}
+	in.Body.applyTo(&p)
 	_, err := h.DB.ExecContext(ctx, `
 		UPDATE auth_providers SET name=?, displayName=?, type=?, icon=?, enabled=?, issuerUrl=?, clientId=?, clientSecret=?,
 		redirectUri=?, scope=?, authorizationEndpoint=?, tokenEndpoint=?, userInfoEndpoint=?, metadata=?,
@@ -179,8 +375,8 @@ func (h *Handler) Update(ctx context.Context, in *APUpdateInput) (*APSingleOutpu
 		return nil, apperr.Internal("update provider")
 	}
 	out := &APSingleOutput{}
-	out.Body.Provider = p
-	out.Body.Provider.ID = in.ID
+	out.Body.Success = true
+	out.Body.Data = p
 	return out, nil
 }
 
@@ -193,7 +389,15 @@ type APReorderInput struct {
 		Providers []APReorderEntry `json:"providers"`
 	}
 }
-type APMsgOutput struct{ Body struct{ Message string `json:"message"` } }
+// APMsgOutput matches the frontend's `ApiMessageResponse = { success, message }`
+// envelope. The settings UI branches on `data.success` for Reorder/Delete just
+// like it does for Create/Update.
+type APMsgOutput struct {
+	Body struct {
+		Success bool   `json:"success"`
+		Message string `json:"message"`
+	}
+}
 
 func (h *Handler) Reorder(ctx context.Context, in *APReorderInput) (*APMsgOutput, error) {
 	if _, err := auth.EnsureAdmin(ctx, h.DB); err != nil {
@@ -205,12 +409,13 @@ func (h *Handler) Reorder(ctx context.Context, in *APReorderInput) (*APMsgOutput
 	}
 	defer tx.Rollback()
 	for _, p := range in.Body.Providers {
-		_, _ = tx.ExecContext(ctx, `UPDATE auth_providers SET sortOrder=? WHERE id=?`, p.SortOrder, p.ID)
+		dbtypes.LogBestEffort(ctx, "authproviders.authproviders.update.auth_providers.set.sortorder", tx, `UPDATE auth_providers SET sortOrder=? WHERE id=?`, p.SortOrder, p.ID)
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, apperr.Internal("commit")
 	}
 	out := &APMsgOutput{}
+	out.Body.Success = true
 	out.Body.Message = "reordered"
 	return out, nil
 }
@@ -225,6 +430,7 @@ func (h *Handler) Delete(ctx context.Context, in *APDeleteInput) (*APMsgOutput, 
 		return nil, apperr.Internal("delete provider")
 	}
 	out := &APMsgOutput{}
+	out.Body.Success = true
 	out.Body.Message = "deleted"
 	return out, nil
 }
@@ -242,8 +448,11 @@ func (h *Handler) Authorize(w http.ResponseWriter, r *http.Request) {
 	}
 	verifier, challenge := pkcePair()
 	stateID := genState()
+	h.stateMu.Lock()
 	h.state[stateID] = stateEntry{Provider: name, CodeVerifier: verifier, CreatedAt: time.Now()}
-	go h.gcState()
+	h.stateMu.Unlock()
+	// State map is GC'd by a periodic ticker started in StartGC at boot —
+	// no need to fire one here too.
 
 	conf, ctx := h.oauth2Config(r.Context(), p)
 	_ = ctx
@@ -259,12 +468,18 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 	code := r.URL.Query().Get("code")
 	stateID := r.URL.Query().Get("state")
 
+	// Pop the state entry atomically so a replay of the same callback
+	// URL doesn't reuse it.
+	h.stateMu.Lock()
 	st, ok := h.state[stateID]
+	if ok {
+		delete(h.state, stateID)
+	}
+	h.stateMu.Unlock()
 	if !ok || st.Provider != name {
 		apperr.WriteJSON(w, http.StatusBadRequest, "invalid state")
 		return
 	}
-	delete(h.state, stateID)
 
 	p, err := h.loadByName(r.Context(), name)
 	if err != nil || !p.Enabled {
@@ -386,7 +601,7 @@ func (h *Handler) linkOrCreate(ctx context.Context, p Provider, email, sub strin
 	// 2) User exists by email?
 	err = h.DB.GetContext(ctx, &userID, `SELECT id FROM users WHERE email = ?`, email)
 	if err == nil {
-		_, _ = h.DB.ExecContext(ctx,
+		dbtypes.LogBestEffort(ctx, "authproviders.link_existing_user", h.DB,
 			`INSERT INTO user_auth_providers (id, userId, providerId, externalId, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?)`,
 			uuid.NewString(), userID, p.ID, sub, time.Now(), time.Now())
 		var isAdmin bool
@@ -416,7 +631,7 @@ func (h *Handler) linkOrCreate(ctx context.Context, p Provider, email, sub strin
 	if err != nil {
 		return "", false, apperr.Internal("auto-register: " + err.Error())
 	}
-	_, _ = h.DB.ExecContext(ctx,
+	dbtypes.LogBestEffort(ctx, "authproviders.link_new_user", h.DB,
 		`INSERT INTO user_auth_providers (id, userId, providerId, externalId, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?)`,
 		uuid.NewString(), uid, p.ID, sub, now, now)
 	return uid, isAdmin, nil
@@ -459,6 +674,8 @@ func deref(p *string) string {
 
 func (h *Handler) gcState() {
 	cutoff := time.Now().Add(-10 * time.Minute)
+	h.stateMu.Lock()
+	defer h.stateMu.Unlock()
 	for k, v := range h.state {
 		if v.CreatedAt.Before(cutoff) {
 			delete(h.state, k)

@@ -50,13 +50,30 @@ type InviteCreateInput struct {
 		ExpiresInHours int `json:"expiresInHours,omitempty"`
 	}
 }
-type InviteCreateOutput struct{ Body struct{ Token Token `json:"inviteToken"` } }
+
+// InviteCreateOutput is the flat `{token, expiresAt}` shape the frontend
+// expects (`GenerateInviteTokenResponse` in apps/web/.../invite/types.ts).
+// The legacy code returned `{inviteToken: {…}}` and the modal that builds the
+// invite URL did `${origin}/register-with-invite/${response.token}` — with the
+// wrapper, that URL ended with `/undefined`.
+type InviteCreateOutput struct {
+	Body struct {
+		Token     string             `json:"token"`
+		ExpiresAt dbtypes.PrismaTime `json:"expiresAt"`
+	}
+}
 type InviteListOutput struct{ Body struct{ Tokens []Token `json:"inviteTokens"` } }
 type InviteGetInput struct{ Token string `path:"token"` }
+
+// InviteGetOutput matches `ValidateInviteTokenResponse` — explicit `used` and
+// `expired` booleans so the register page (`apps/web/.../register-with-invite/
+// [token]/page.tsx`) can branch to the right error copy. A single `reason`
+// string left every error falling through to the generic "invalid" branch.
 type InviteGetOutput struct {
 	Body struct {
-		Valid  bool   `json:"valid"`
-		Reason string `json:"reason,omitempty"`
+		Valid   bool `json:"valid"`
+		Used    bool `json:"used,omitempty"`
+		Expired bool `json:"expired,omitempty"`
 	}
 }
 
@@ -73,14 +90,16 @@ func (h *Handler) Create(ctx context.Context, in *InviteCreateInput) (*InviteCre
 	_, _ = rand.Read(b)
 	tok := hex.EncodeToString(b)
 	now := time.Now().UTC()
+	expiresAt := now.Add(time.Duration(hours) * time.Hour)
 	_, err = h.DB.ExecContext(ctx,
 		`INSERT INTO invite_tokens (id, token, expiresAt, createdBy, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?)`,
-		uuid.NewString(), tok, now.Add(time.Duration(hours)*time.Hour), uc.UserID, now, now)
+		uuid.NewString(), tok, expiresAt, uc.UserID, now, now)
 	if err != nil {
 		return nil, apperr.Internal("create invite: " + err.Error())
 	}
 	out := &InviteCreateOutput{}
-	out.Body.Token = Token{Token: tok, ExpiresAt: dbtypes.PrismaTime{Time: now.Add(time.Duration(hours) * time.Hour)}, CreatedBy: uc.UserID}
+	out.Body.Token = tok
+	out.Body.ExpiresAt = dbtypes.PrismaTime{Time: expiresAt}
 	return out, nil
 }
 
@@ -89,6 +108,8 @@ func (h *Handler) List(ctx context.Context, _ *struct{}) (*InviteListOutput, err
 		return nil, apperr.Unauthorized(err.Error())
 	}
 	out := &InviteListOutput{}
+	// Pre-initialise so an empty result serialises as `[]`, not `null`.
+	out.Body.Tokens = []Token{}
 	_ = h.DB.SelectContext(ctx, &out.Body.Tokens, `SELECT token, expiresAt, usedAt, createdBy FROM invite_tokens ORDER BY createdAt DESC`)
 	return out, nil
 }
@@ -97,18 +118,18 @@ func (h *Handler) Get(ctx context.Context, in *InviteGetInput) (*InviteGetOutput
 	out := &InviteGetOutput{}
 	var t Token
 	if err := h.DB.GetContext(ctx, &t, `SELECT token, expiresAt, usedAt, createdBy FROM invite_tokens WHERE token = ?`, in.Token); err != nil {
+		// Not found — neither used nor expired; just invalid.
 		out.Body.Valid = false
-		out.Body.Reason = "token not found"
 		return out, nil
 	}
 	if t.UsedAt != nil {
 		out.Body.Valid = false
-		out.Body.Reason = "already used"
+		out.Body.Used = true
 		return out, nil
 	}
 	if time.Now().After(t.ExpiresAt.Time) {
 		out.Body.Valid = false
-		out.Body.Reason = "expired"
+		out.Body.Expired = true
 		return out, nil
 	}
 	out.Body.Valid = true

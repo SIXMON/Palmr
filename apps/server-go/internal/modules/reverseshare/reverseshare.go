@@ -220,19 +220,75 @@ func (h *Handler) List(ctx context.Context, _ *struct{}) (*RSListOutput, error) 
 		return nil, apperr.Unauthorized(err.Error())
 	}
 	out := &RSListOutput{}
-	// Two-step: fetch ids first, then loadWithRel each. Cheaper than a
-	// hand-written join for the typical "tens of reverse-shares" case.
-	var ids []string
-	if err := h.DB.SelectContext(ctx, &ids,
-		`SELECT id FROM reverse_shares WHERE creatorId = ? ORDER BY createdAt DESC`, uc.UserID); err != nil {
+	// Pre-initialise so an empty result serialises as `[]`, not `null`.
+	out.Body.ReverseShares = []ReverseShareWithRel{}
+	// Single SELECT for the rows, then batch-load files + aliases in
+	// O(1) queries → 3 round-trips total whatever the user owns.
+	var rows []ReverseShare
+	if err := h.DB.SelectContext(ctx, &rows, `
+		SELECT id, name, description, expiration, maxFiles, maxFileSize, allowedFileTypes, password,
+		       pageLayout, isActive, nameFieldRequired, emailFieldRequired, creatorId, createdAt, updatedAt
+		FROM reverse_shares WHERE creatorId = ? ORDER BY createdAt DESC`, uc.UserID); err != nil {
 		return out, nil
 	}
-	out.Body.ReverseShares = make([]ReverseShareWithRel, 0, len(ids))
-	for _, id := range ids {
-		v, err := h.loadWithRel(ctx, id)
-		if err == nil {
-			out.Body.ReverseShares = append(out.Body.ReverseShares, v)
+	if len(rows) == 0 {
+		return out, nil
+	}
+	ids := make([]string, len(rows))
+	for i, r := range rows {
+		ids[i] = r.ID
+	}
+
+	// Batch-load files keyed by reverseShareId.
+	filesByRS := map[string][]ReverseShareFile{}
+	if q, args, err := sqlx.In(`
+		SELECT id, name, description, extension, size, objectName, uploaderEmail, uploaderName, reverseShareId, createdAt, updatedAt
+		FROM reverse_share_files WHERE reverseShareId IN (?) ORDER BY createdAt ASC`, ids); err == nil {
+		rf, _ := h.DB.QueryxContext(ctx, h.DB.Rebind(q), args...)
+		if rf != nil {
+			for rf.Next() {
+				var f ReverseShareFile
+				var rsID string
+				if err := rf.Scan(&f.ID, &f.Name, &f.Description, &f.Extension, &f.Size, &f.ObjectName,
+					&f.UploaderEmail, &f.UploaderName, &rsID, &f.CreatedAt, &f.UpdatedAt); err == nil {
+					filesByRS[rsID] = append(filesByRS[rsID], f)
+				}
+			}
+			rf.Close()
 		}
+	}
+
+	// Batch-load aliases.
+	aliasByRS := map[string]*ReverseShareAlias{}
+	if q, args, err := sqlx.In(`
+		SELECT id, alias, reverseShareId, createdAt, updatedAt FROM reverse_share_aliases WHERE reverseShareId IN (?)`, ids); err == nil {
+		ra, _ := h.DB.QueryxContext(ctx, h.DB.Rebind(q), args...)
+		if ra != nil {
+			for ra.Next() {
+				var a ReverseShareAlias
+				if err := ra.Scan(&a.ID, &a.Alias, &a.ReverseShareID, &a.CreatedAt, &a.UpdatedAt); err == nil {
+					aRef := a
+					aliasByRS[a.ReverseShareID] = &aRef
+				}
+			}
+			ra.Close()
+		}
+	}
+
+	out.Body.ReverseShares = make([]ReverseShareWithRel, 0, len(rows))
+	for _, r := range rows {
+		// Ensure a missing entry in the files map still serialises as
+		// `[]`, not `null` — the React UI calls `.length` / `.map` on it.
+		files := filesByRS[r.ID]
+		if files == nil {
+			files = []ReverseShareFile{}
+		}
+		out.Body.ReverseShares = append(out.Body.ReverseShares, ReverseShareWithRel{
+			ReverseShare: r,
+			HasPassword:  r.Password != nil && *r.Password != "",
+			Files:        files,
+			Alias:        aliasByRS[r.ID],
+		})
 	}
 	return out, nil
 }
@@ -379,7 +435,7 @@ func (h *Handler) setActive(ctx context.Context, id string, active bool) (*RSSin
 	if err := h.assertOwner(ctx, id, uc.UserID); err != nil {
 		return nil, err
 	}
-	_, _ = h.DB.ExecContext(ctx, `UPDATE reverse_shares SET isActive = ?, updatedAt = CURRENT_TIMESTAMP WHERE id = ?`, active, id)
+	dbtypes.LogBestEffort(ctx, "reverseshare.reverseshare.update.reverse_shares.set.isactive", h.DB, `UPDATE reverse_shares SET isActive = ?, updatedAt = CURRENT_TIMESTAMP WHERE id = ?`, active, id)
 	rs, _ := h.loadWithRel(ctx, id)
 	out := &RSSingleOutput{}
 	out.Body.ReverseShare = rs
@@ -529,20 +585,26 @@ func (h *Handler) publicGet(ctx context.Context, id string) (*RSPublicGetOutput,
 }
 
 type RSAliasMetaInput struct{ Alias string `path:"alias"` }
+
+// RSAliasMetaOutput includes `maxFiles` so the reverse-share landing page
+// (`apps/web/src/app/(shares)/r/[alias]/layout.tsx`) can switch its
+// OpenGraph description to the "with limit" variant. Without it the layout
+// always renders the generic copy.
 type RSAliasMetaOutput struct {
 	Body struct {
 		Name        *string `json:"name"`
 		Description *string `json:"description"`
 		AppName     string  `json:"appName"`
+		MaxFiles    *int    `json:"maxFiles"`
 	}
 }
 
 func (h *Handler) AliasMetadata(ctx context.Context, in *RSAliasMetaInput) (*RSAliasMetaOutput, error) {
 	out := &RSAliasMetaOutput{}
 	_ = h.DB.QueryRowContext(ctx, `
-		SELECT rs.name, rs.description
+		SELECT rs.name, rs.description, rs.maxFiles
 		FROM reverse_shares rs JOIN reverse_share_aliases a ON a.reverseShareId = rs.id WHERE a.alias = ?`, in.Alias).
-		Scan(&out.Body.Name, &out.Body.Description)
+		Scan(&out.Body.Name, &out.Body.Description, &out.Body.MaxFiles)
 	_ = h.DB.GetContext(ctx, &out.Body.AppName, `SELECT value FROM app_configs WHERE key = 'appName'`)
 	if out.Body.AppName == "" {
 		out.Body.AppName = "Palmr"
@@ -585,7 +647,7 @@ func (h *Handler) PresignByAlias(ctx context.Context, in *PresignAliasInput) (*P
 	if err != nil {
 		return nil, err
 	}
-	rs, err := h.loadIncludingPassword(ctx, id)
+	rs, err := h.load(ctx, id)
 	if err != nil {
 		return nil, apperr.NotFound("reverse share not found")
 	}
@@ -596,7 +658,7 @@ func (h *Handler) PresignByAlias(ctx context.Context, in *PresignAliasInput) (*P
 }
 
 func (h *Handler) PresignByID(ctx context.Context, in *PresignIDInput) (*PresignOutput, error) {
-	rs, err := h.loadIncludingPassword(ctx, in.ID)
+	rs, err := h.load(ctx, in.ID)
 	if err != nil {
 		return nil, apperr.NotFound("reverse share not found")
 	}
@@ -654,10 +716,27 @@ type RegisterFileIDInput struct {
 		UploaderName  *string `json:"uploaderName,omitempty"`
 	}
 }
+// RSFileOutput mirrors the frontend's `RegisterFileUpload201 = { file:
+// ReverseShareFile }`. `size` is a stringified int64 (BigInt parity with the
+// Prisma Node backend) so the web client can render large file sizes without
+// JavaScript number-precision loss.
 type RSFileOutput struct {
 	Body struct {
-		File map[string]any `json:"file"`
+		File rsFileView `json:"file"`
 	}
+}
+
+type rsFileView struct {
+	ID            string             `json:"id"`
+	Name          string             `json:"name"`
+	Description   *string            `json:"description"`
+	Extension     string             `json:"extension"`
+	Size          dbtypes.BigIntStr  `json:"size"`
+	ObjectName    string             `json:"objectName"`
+	UploaderEmail *string            `json:"uploaderEmail"`
+	UploaderName  *string            `json:"uploaderName"`
+	CreatedAt     dbtypes.PrismaTime `json:"createdAt"`
+	UpdatedAt     dbtypes.PrismaTime `json:"updatedAt"`
 }
 
 func (h *Handler) RegisterFileByAlias(ctx context.Context, in *RegisterFileAliasInput) (*RSFileOutput, error) {
@@ -665,7 +744,7 @@ func (h *Handler) RegisterFileByAlias(ctx context.Context, in *RegisterFileAlias
 	if err != nil {
 		return nil, err
 	}
-	rs, err := h.loadIncludingPassword(ctx, id)
+	rs, err := h.load(ctx, id)
 	if err != nil {
 		return nil, apperr.NotFound("reverse share not found")
 	}
@@ -677,7 +756,7 @@ func (h *Handler) RegisterFileByAlias(ctx context.Context, in *RegisterFileAlias
 }
 
 func (h *Handler) RegisterFileByID(ctx context.Context, in *RegisterFileIDInput) (*RSFileOutput, error) {
-	rs, err := h.loadIncludingPassword(ctx, in.ID)
+	rs, err := h.load(ctx, in.ID)
 	if err != nil {
 		return nil, apperr.NotFound("reverse share not found")
 	}
@@ -699,14 +778,17 @@ func (h *Handler) insertFile(ctx context.Context, reverseShareID, name string, d
 		return nil, apperr.Internal("register file: " + err.Error())
 	}
 	out := &RSFileOutput{}
-	out.Body.File = map[string]any{
-		"id":         id,
-		"name":       name,
-		"extension":  ext,
-		"size":       size,
-		"objectName": obj,
-		"createdAt":  now,
-		"updatedAt":  now,
+	out.Body.File = rsFileView{
+		ID:            id,
+		Name:          name,
+		Description:   desc,
+		Extension:     ext,
+		Size:          dbtypes.BigIntStr(size),
+		ObjectName:    obj,
+		UploaderEmail: email,
+		UploaderName:  uploader,
+		CreatedAt:     dbtypes.PrismaTime{Time: now},
+		UpdatedAt:     dbtypes.PrismaTime{Time: now},
 	}
 	return out, nil
 }
@@ -728,7 +810,7 @@ type CheckPasswordOutput struct {
 }
 
 func (h *Handler) CheckPassword(ctx context.Context, in *CheckPasswordInput) (*CheckPasswordOutput, error) {
-	rs, err := h.loadIncludingPassword(ctx, in.ID)
+	rs, err := h.load(ctx, in.ID)
 	if err != nil {
 		return nil, apperr.NotFound("reverse share not found")
 	}
@@ -766,7 +848,7 @@ func (h *Handler) MultipartCreate(ctx context.Context, in *MpCreateAliasInput) (
 	if err != nil {
 		return nil, err
 	}
-	rs, err := h.loadIncludingPassword(ctx, id)
+	rs, err := h.load(ctx, id)
 	if err != nil {
 		return nil, apperr.NotFound("reverse share not found")
 	}
@@ -956,7 +1038,7 @@ func (h *Handler) DeleteFile(ctx context.Context, in *RSFileInput) (*RSMsgOutput
 	if h.S3 != nil {
 		_ = h.S3.Delete(ctx, obj)
 	}
-	_, _ = h.DB.ExecContext(ctx, `DELETE FROM reverse_share_files WHERE id = ?`, in.FileID)
+	dbtypes.LogBestEffort(ctx, "reverseshare.reverseshare.delete.from.reverse_share_files.where", h.DB, `DELETE FROM reverse_share_files WHERE id = ?`, in.FileID)
 	out := &RSMsgOutput{}
 	out.Body.Message = "deleted"
 	return out, nil
@@ -1023,9 +1105,6 @@ func (h *Handler) load(ctx context.Context, id string) (ReverseShare, error) {
 	return rs, err
 }
 
-func (h *Handler) loadIncludingPassword(ctx context.Context, id string) (ReverseShare, error) {
-	return h.load(ctx, id)
-}
 
 // loadWithRel returns the row plus its alias + uploaded files, which is
 // what the admin UI consumes (ReverseShareWithAlias on the TS side).
@@ -1037,6 +1116,8 @@ func (h *Handler) loadWithRel(ctx context.Context, id string) (ReverseShareWithR
 	out := ReverseShareWithRel{
 		ReverseShare: rs,
 		HasPassword:  rs.Password != nil && *rs.Password != "",
+		// Pre-initialise so an empty result serialises as `[]`, not `null`.
+		Files: []ReverseShareFile{},
 	}
 	// Files for this reverse-share
 	_ = h.DB.SelectContext(ctx, &out.Files, `

@@ -95,6 +95,8 @@ func run() error {
 	if err != nil {
 		log.Warn("S3 not initialised", "err", err)
 	}
+	// Let /app/system-info reflect whether external S3 is in use.
+	app.HasExternalS3 = cfg.EnableS3
 
 	signer := auth.NewSigner(cfg.JWTSecret, cfg.JWTTTL())
 	mw := &auth.Middleware{Signer: signer, DB: conn, SecureSite: cfg.SecureSite}
@@ -113,8 +115,13 @@ func run() error {
 	// -------------------------------------------------------------------------
 	health.Register(api, &health.Handler{DB: conn})
 	app.Register(api, &app.Handler{DB: conn})
+	// Same Service instance is reused by /app/test-smtp and the password
+	// reset flow — share a singleton so the SMTP config is read once per
+	// request from the DB (cheap, indexed lookups).
+	mailSvc := &email.Service{DB: conn}
 	authn.RegisterPublic(api, &authn.Handler{
 		DB: conn, Signer: signer, SecureSite: cfg.SecureSite, CookieTTL: cfg.JWTTTL(),
+		Mailer: mailSvc,
 	})
 	user.RegisterPublic(api, &user.Handler{
 		DB: conn, Signer: signer, BcryptCost: cfg.BcryptCost,
@@ -140,7 +147,7 @@ func run() error {
 	storagemod.Register(api, &storagemod.Handler{DB: conn})
 	twofactor.Register(api, &twofactor.Handler{DB: conn, AppName: "Palmr"})
 	invite.Register(api, &invite.Handler{DB: conn, BcryptCost: cfg.BcryptCost})
-	email.Register(api, &email.Handler{Svc: &email.Service{DB: conn}})
+	email.Register(api, &email.Handler{Svc: mailSvc})
 
 	// -------------------------------------------------------------------------
 	// OAuth providers — admin CRUD via huma, plus the OAuth dance which
@@ -149,6 +156,7 @@ func run() error {
 	apHandler := authproviders.New(conn, signer, cfg.SecureSite, cfg.JWTTTL())
 	authproviders.Register(api, apHandler)
 	apHandler.RegisterPlain(r)
+	apHandler.StartGC(ctx, 5*time.Minute) // expire abandoned OAuth state entries
 
 	// -------------------------------------------------------------------------
 	// Embed route (raw streaming, not huma)

@@ -16,6 +16,7 @@ package uploads
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -25,15 +26,59 @@ import (
 	"github.com/jmoiron/sqlx"
 
 	"github.com/sixmon/palmr/apps/server-go/internal/auth"
+	dbtypes "github.com/sixmon/palmr/apps/server-go/internal/db"
 	apperr "github.com/sixmon/palmr/apps/server-go/internal/errors"
 	"github.com/sixmon/palmr/apps/server-go/internal/imageresize"
 )
 
+// userRow is the JSON shape the frontend's profile page (`use-profile.ts`)
+// drops into both `userData` and `user` state after an avatar upload/remove.
+// We can't reach into the `user` package without a cycle, so duplicate the
+// minimal shape here.
+type userRow struct {
+	ID        string             `db:"id"        json:"id"`
+	FirstName string             `db:"firstName" json:"firstName"`
+	LastName  string             `db:"lastName"  json:"lastName"`
+	Username  string             `db:"username"  json:"username"`
+	Email     string             `db:"email"     json:"email"`
+	Image     *string            `db:"image"     json:"image"`
+	IsAdmin   bool               `db:"isAdmin"   json:"isAdmin"`
+	IsActive  bool               `db:"isActive"  json:"isActive"`
+	CreatedAt dbtypes.PrismaTime `db:"createdAt" json:"createdAt"`
+	UpdatedAt dbtypes.PrismaTime `db:"updatedAt" json:"updatedAt"`
+}
+
+func (h *Handler) loadUserRow(r *http.Request, id string) (*userRow, error) {
+	var u userRow
+	err := h.DB.GetContext(r.Context(), &u,
+		`SELECT id, firstName, lastName, username, email, image, isAdmin, isActive, createdAt, updatedAt
+		 FROM users WHERE id = ?`, id)
+	if err != nil {
+		return nil, err
+	}
+	return &u, nil
+}
+
+func writeJSON(w http.ResponseWriter, status int, body any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(body)
+}
+
 const (
-	maxAvatarBytes = 5 << 20 // 5 MB
-	maxLogoBytes   = 5 << 20 // 5 MB
-	avatarPx       = 256
-	logoPx         = 512
+	// Upload size caps apply to the *raw* multipart request body. Both
+	// avatars and logos get resized to a small dimension server-side, but
+	// the client still uploads the source file. Phone JPEGs routinely
+	// land in the 8–15 MB range, so a 5 MB cap (the previous value) was
+	// rejecting most real photos with `http: request body too large`.
+	maxAvatarBytes = 20 << 20 // 20 MB
+	maxLogoBytes   = 10 << 20 // 10 MB
+	// multipartMemoryBytes is how much of the parsed form ParseMultipartForm
+	// keeps in RAM before spilling to a temp file. It can be much smaller
+	// than the body cap — the file field gets streamed through, not held.
+	multipartMemoryBytes = 4 << 20 // 4 MB
+	avatarPx             = 256
+	logoPx               = 512
 )
 
 type Handler struct {
@@ -55,6 +100,10 @@ func (h *Handler) Register(r chi.Router) {
 // Avatar
 // -----------------------------------------------------------------------------
 
+// uploadOwnAvatar returns the full refreshed user row. The profile page
+// (`apps/web/.../profile/hooks/use-profile.ts`) calls
+// `setUserData(response.data); setUser(response.data)` — handing it a
+// `{message: "…"}` object wipes the displayed name/email/etc until refresh.
 func (h *Handler) uploadOwnAvatar(w http.ResponseWriter, r *http.Request) {
 	uc, ok := auth.FromContext(r.Context())
 	if !ok {
@@ -72,8 +121,12 @@ func (h *Handler) uploadOwnAvatar(w http.ResponseWriter, r *http.Request) {
 		apperr.WriteJSON(w, http.StatusInternalServerError, "update user")
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write([]byte(`{"message":"avatar updated"}`))
+	u, err := h.loadUserRow(r, uc.UserID)
+	if err != nil {
+		apperr.WriteJSON(w, http.StatusInternalServerError, "reload user")
+		return
+	}
+	writeJSON(w, http.StatusOK, u)
 }
 
 func (h *Handler) removeOwnAvatar(w http.ResponseWriter, r *http.Request) {
@@ -88,8 +141,12 @@ func (h *Handler) removeOwnAvatar(w http.ResponseWriter, r *http.Request) {
 		apperr.WriteJSON(w, http.StatusInternalServerError, "update user")
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write([]byte(`{"message":"avatar removed"}`))
+	u, err := h.loadUserRow(r, uc.UserID)
+	if err != nil {
+		apperr.WriteJSON(w, http.StatusInternalServerError, "reload user")
+		return
+	}
+	writeJSON(w, http.StatusOK, u)
 }
 
 func (h *Handler) adminSetUserAvatar(w http.ResponseWriter, r *http.Request) {
@@ -110,14 +167,22 @@ func (h *Handler) adminSetUserAvatar(w http.ResponseWriter, r *http.Request) {
 		apperr.WriteJSON(w, http.StatusInternalServerError, "update user")
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write([]byte(`{"message":"avatar updated"}`))
+	u, err := h.loadUserRow(r, id)
+	if err != nil {
+		apperr.WriteJSON(w, http.StatusInternalServerError, "reload user")
+		return
+	}
+	writeJSON(w, http.StatusOK, u)
 }
 
 // -----------------------------------------------------------------------------
 // App logo
 // -----------------------------------------------------------------------------
 
+// uploadAppLogo returns `{logo: <data-uri>}` because the settings UI reads
+// `response.data.logo` to swap the preview (`apps/web/.../settings/components/
+// logo-input.tsx`). Returning a `{message: …}` envelope made the preview blank
+// out after upload even though the DB value was set.
 func (h *Handler) uploadAppLogo(w http.ResponseWriter, r *http.Request) {
 	uc, ok := auth.FromContext(r.Context())
 	if !ok || !uc.IsAdmin {
@@ -135,8 +200,7 @@ func (h *Handler) uploadAppLogo(w http.ResponseWriter, r *http.Request) {
 		apperr.WriteJSON(w, http.StatusInternalServerError, "update logo")
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write([]byte(`{"message":"logo updated"}`))
+	writeJSON(w, http.StatusOK, map[string]string{"logo": dataURI})
 }
 
 func (h *Handler) removeAppLogo(w http.ResponseWriter, r *http.Request) {
@@ -169,7 +233,11 @@ func (h *Handler) readAndProcess(r *http.Request, maxBytes int64, dim int, enc i
 	ct := r.Header.Get("Content-Type")
 	switch {
 	case strings.HasPrefix(ct, "multipart/form-data"):
-		if err := r.ParseMultipartForm(maxBytes); err != nil {
+		// ParseMultipartForm's argument is the in-memory buffer size, not
+		// the body cap — the cap is already enforced by MaxBytesReader
+		// above. Using a small RAM budget keeps multi-MB photos from
+		// being held in process memory unnecessarily.
+		if err := r.ParseMultipartForm(multipartMemoryBytes); err != nil {
 			return "", errors.New("parse multipart: " + err.Error())
 		}
 		var src io.Reader

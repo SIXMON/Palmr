@@ -16,15 +16,34 @@ import (
 	apperr "github.com/sixmon/palmr/apps/server-go/internal/errors"
 )
 
+// Folder is the JSON shape returned for every folder endpoint. `TotalSize`
+// and `Count` are computed in-handler (never scanned from a single row) to
+// match the frontend's `FolderItem.totalSize` / `FolderItem._count` parity
+// with the Prisma backend.
+//
+// `TotalSize` is the *direct* sum of file sizes under this folder, matching
+// what Prisma's `_count`-style aggregation produces — we don't recurse into
+// subfolders here. The UI shows a "—" when the field is missing, but with
+// it populated callers see proper KB/MB/GB numbers.
 type Folder struct {
-	ID          string    `db:"id"          json:"id"`
-	Name        string    `db:"name"        json:"name"`
-	Description *string   `db:"description" json:"description"`
-	ObjectName  string    `db:"objectName"  json:"objectName"`
-	ParentID    *string   `db:"parentId"    json:"parentId"`
-	UserID      string    `db:"userId"      json:"userId"`
+	ID          string             `db:"id"          json:"id"`
+	Name        string             `db:"name"        json:"name"`
+	Description *string            `db:"description" json:"description"`
+	ObjectName  string             `db:"objectName"  json:"objectName"`
+	ParentID    *string            `db:"parentId"    json:"parentId"`
+	UserID      string             `db:"userId"      json:"userId"`
 	CreatedAt   dbtypes.PrismaTime `db:"createdAt"   json:"createdAt"`
 	UpdatedAt   dbtypes.PrismaTime `db:"updatedAt"   json:"updatedAt"`
+
+	TotalSize *dbtypes.BigIntStr `db:"-" json:"totalSize,omitempty"`
+	Count     *FolderCount       `db:"-" json:"_count,omitempty"`
+}
+
+// FolderCount mirrors Prisma's `_count` relation aggregate: direct
+// children only.
+type FolderCount struct {
+	Files    int `json:"files"`
+	Children int `json:"children"`
 }
 
 type Handler struct {
@@ -101,9 +120,35 @@ func (h *Handler) List(ctx context.Context, _ *FolderListInput) (*FolderListOutp
 		return nil, apperr.Unauthorized(err.Error())
 	}
 	out := &FolderListOutput{}
-	_ = h.DB.SelectContext(ctx, &out.Body.Folders,
-		`SELECT id, name, description, objectName, parentId, userId, createdAt, updatedAt
-		 FROM folders WHERE userId = ? ORDER BY createdAt DESC`, uc.UserID)
+	// Pre-initialise so an empty result serialises as `[]`, not `null`.
+	out.Body.Folders = []Folder{}
+	// Compute totalSize and direct file/children counts in the same query
+	// via correlated subselects — keeps the response shape on parity with
+	// the Prisma backend's `_count`/aggregate idiom without a separate
+	// per-folder round-trip.
+	rows, err := h.DB.QueryContext(ctx, `
+		SELECT f.id, f.name, f.description, f.objectName, f.parentId, f.userId, f.createdAt, f.updatedAt,
+		       (SELECT COUNT(*) FROM files   WHERE folderId = f.id) AS file_count,
+		       (SELECT COUNT(*) FROM folders WHERE parentId = f.id) AS child_count,
+		       (SELECT COALESCE(SUM(size), 0) FROM files WHERE folderId = f.id) AS total_size
+		FROM folders f WHERE f.userId = ? ORDER BY f.createdAt DESC`, uc.UserID)
+	if err != nil {
+		return nil, apperr.Internal("list folders")
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var f Folder
+		var fileCount, childCount int
+		var totalSize int64
+		if err := rows.Scan(&f.ID, &f.Name, &f.Description, &f.ObjectName, &f.ParentID, &f.UserID, &f.CreatedAt, &f.UpdatedAt,
+			&fileCount, &childCount, &totalSize); err != nil {
+			continue
+		}
+		size := dbtypes.BigIntStr(totalSize)
+		f.TotalSize = &size
+		f.Count = &FolderCount{Files: fileCount, Children: childCount}
+		out.Body.Folders = append(out.Body.Folders, f)
+	}
 	return out, nil
 }
 
@@ -233,10 +278,22 @@ func (h *Handler) Move(ctx context.Context, in *FolderMoveInput) (*FolderSingleO
 
 func (h *Handler) load(ctx context.Context, id string) (Folder, error) {
 	var f Folder
-	err := h.DB.GetContext(ctx, &f,
-		`SELECT id, name, description, objectName, parentId, userId, createdAt, updatedAt
-		 FROM folders WHERE id = ?`, id)
-	return f, err
+	var fileCount, childCount int
+	var totalSize int64
+	row := h.DB.QueryRowContext(ctx, `
+		SELECT f.id, f.name, f.description, f.objectName, f.parentId, f.userId, f.createdAt, f.updatedAt,
+		       (SELECT COUNT(*) FROM files   WHERE folderId = f.id) AS file_count,
+		       (SELECT COUNT(*) FROM folders WHERE parentId = f.id) AS child_count,
+		       (SELECT COALESCE(SUM(size), 0) FROM files WHERE folderId = f.id) AS total_size
+		FROM folders f WHERE f.id = ?`, id)
+	if err := row.Scan(&f.ID, &f.Name, &f.Description, &f.ObjectName, &f.ParentID, &f.UserID,
+		&f.CreatedAt, &f.UpdatedAt, &fileCount, &childCount, &totalSize); err != nil {
+		return f, err
+	}
+	size := dbtypes.BigIntStr(totalSize)
+	f.TotalSize = &size
+	f.Count = &FolderCount{Files: fileCount, Children: childCount}
+	return f, nil
 }
 
 func (h *Handler) assertOwner(ctx context.Context, id, userID string) error {

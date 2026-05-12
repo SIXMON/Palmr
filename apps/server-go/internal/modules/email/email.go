@@ -101,9 +101,12 @@ type EmailTestInput struct {
 		To string `json:"to" required:"true" format:"email"`
 	}
 }
+// EmailTestOutput uses `success` (not `ok`) to match the frontend's
+// `TestSmtpConnectionResult = { success, message }` shape — any caller
+// branching on `response.data.success` would otherwise always see `undefined`.
 type EmailTestOutput struct {
 	Body struct {
-		OK      bool   `json:"ok"`
+		Success bool   `json:"success"`
 		Message string `json:"message"`
 	}
 }
@@ -115,11 +118,11 @@ func (h *Handler) Test(ctx context.Context, in *EmailTestInput) (*EmailTestOutpu
 	err := h.Svc.Send(ctx, in.Body.To, "Palmr — SMTP test", "<p>If you see this, SMTP works.</p>")
 	out := &EmailTestOutput{}
 	if err != nil {
-		out.Body.OK = false
+		out.Body.Success = false
 		out.Body.Message = err.Error()
 		return out, nil
 	}
-	out.Body.OK = true
+	out.Body.Success = true
 	out.Body.Message = "sent"
 	return out, nil
 }

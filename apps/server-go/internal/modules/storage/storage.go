@@ -27,11 +27,26 @@ func Register(api huma.API, h *Handler) {
 	}, h.CheckUpload)
 }
 
+// DiskOutput matches the frontend `DiskSpaceInfo` (apps/web/.../app/types.ts):
+// values in GB (float, 2-decimal precision is enough) and a boolean indicating
+// whether the user still has room for *any* upload. The frontend's storage
+// panel reads these fields verbatim — no `success`/`data` envelope here.
 type DiskOutput struct {
 	Body struct {
-		TotalSpace int64 `json:"totalSpace"`
-		UsedSpace  int64 `json:"usedSpace"`
+		DiskSizeGB      float64 `json:"diskSizeGB"`
+		DiskUsedGB      float64 `json:"diskUsedGB"`
+		DiskAvailableGB float64 `json:"diskAvailableGB"`
+		UploadAllowed   bool    `json:"uploadAllowed"`
 	}
+}
+
+const bytesPerGB = 1024 * 1024 * 1024
+
+func bytesToGB(b int64) float64 {
+	// Two-decimal rounding for parity with the legacy Node backend, which
+	// also rounded on the way out.
+	gb := float64(b) / float64(bytesPerGB)
+	return float64(int64(gb*100+0.5)) / 100
 }
 
 func (h *Handler) DiskSpace(ctx context.Context, _ *struct{}) (*DiskOutput, error) {
@@ -41,25 +56,45 @@ func (h *Handler) DiskSpace(ctx context.Context, _ *struct{}) (*DiskOutput, erro
 	}
 	var used int64
 	_ = h.DB.GetContext(ctx, &used, `SELECT COALESCE(SUM(size), 0) FROM files WHERE userId = ?`, uc.UserID)
-	out := &DiskOutput{}
-	out.Body.UsedSpace = used
-	// Total comes from the app_configs `maxTotalStoragePerUser`.
 	var total int64
 	_ = h.DB.GetContext(ctx, &total, `SELECT CAST(value AS INTEGER) FROM app_configs WHERE key = 'maxTotalStoragePerUser'`)
 	if total == 0 {
-		total = 10737418240
+		total = 10737418240 // 10 GiB default — keep in sync with legacy seed.
 	}
-	out.Body.TotalSpace = total
+	available := total - used
+	if available < 0 {
+		available = 0
+	}
+	out := &DiskOutput{}
+	out.Body.DiskSizeGB = bytesToGB(total)
+	out.Body.DiskUsedGB = bytesToGB(used)
+	out.Body.DiskAvailableGB = bytesToGB(available)
+	out.Body.UploadAllowed = available > 0
 	return out, nil
 }
 
 type StorageCheckInput struct {
-	Size int64 `query:"size" required:"true"`
+	// Legacy Node API used `?fileSize=` (see frontend
+	// `CheckUploadAllowedParams.fileSize`); accept both for compat.
+	FileSize int64 `query:"fileSize"`
+	Size     int64 `query:"size"`
 }
+
+// StorageCheckOutput mirrors `CheckUploadAllowed200` on the frontend — same
+// fields as `DiskSpaceInfo` plus a `fileSizeInfo` breakdown of the requested
+// size in different units.
 type StorageCheckOutput struct {
 	Body struct {
-		Allowed bool   `json:"allowed"`
-		Reason  string `json:"reason,omitempty"`
+		DiskSizeGB      float64 `json:"diskSizeGB"`
+		DiskUsedGB      float64 `json:"diskUsedGB"`
+		DiskAvailableGB float64 `json:"diskAvailableGB"`
+		UploadAllowed   bool    `json:"uploadAllowed"`
+		FileSizeInfo    struct {
+			Bytes int64   `json:"bytes"`
+			KB    float64 `json:"kb"`
+			MB    float64 `json:"mb"`
+			GB    float64 `json:"gb"`
+		} `json:"fileSizeInfo"`
 	}
 }
 
@@ -68,22 +103,37 @@ func (h *Handler) CheckUpload(ctx context.Context, in *StorageCheckInput) (*Stor
 	if err != nil {
 		return nil, apperr.Unauthorized(err.Error())
 	}
+	size := in.FileSize
+	if size == 0 {
+		size = in.Size
+	}
 	out := &StorageCheckOutput{}
 	var maxFile, maxTotal int64
 	_ = h.DB.GetContext(ctx, &maxFile, `SELECT CAST(value AS INTEGER) FROM app_configs WHERE key = 'maxFileSize'`)
 	_ = h.DB.GetContext(ctx, &maxTotal, `SELECT CAST(value AS INTEGER) FROM app_configs WHERE key = 'maxTotalStoragePerUser'`)
-	if maxFile > 0 && in.Size > maxFile {
-		out.Body.Allowed = false
-		out.Body.Reason = "file size exceeds per-file limit"
-		return out, nil
+	if maxTotal == 0 {
+		maxTotal = 10737418240
 	}
 	var used int64
 	_ = h.DB.GetContext(ctx, &used, `SELECT COALESCE(SUM(size), 0) FROM files WHERE userId = ?`, uc.UserID)
-	if maxTotal > 0 && used+in.Size > maxTotal {
-		out.Body.Allowed = false
-		out.Body.Reason = "quota exceeded"
-		return out, nil
+	available := maxTotal - used
+	if available < 0 {
+		available = 0
 	}
-	out.Body.Allowed = true
+	allowed := true
+	if maxFile > 0 && size > maxFile {
+		allowed = false
+	}
+	if size > 0 && size > available {
+		allowed = false
+	}
+	out.Body.DiskSizeGB = bytesToGB(maxTotal)
+	out.Body.DiskUsedGB = bytesToGB(used)
+	out.Body.DiskAvailableGB = bytesToGB(available)
+	out.Body.UploadAllowed = allowed
+	out.Body.FileSizeInfo.Bytes = size
+	out.Body.FileSizeInfo.KB = float64(size) / 1024
+	out.Body.FileSizeInfo.MB = float64(size) / (1024 * 1024)
+	out.Body.FileSizeInfo.GB = bytesToGB(size)
 	return out, nil
 }

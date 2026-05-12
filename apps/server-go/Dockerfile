@@ -56,6 +56,13 @@ RUN echo "palmr:x:1001:1001::/data:/sbin/nologin" > /tmp/passwd
 # image running as a non-root user.
 RUN mkdir -p /tmp/data/prisma /tmp/data/uploads /tmp/data/temp-uploads \
     && chown -R 1001:1001 /tmp/data
+# Stage a writable /tmp directory for the scratch image. The runtime
+# needs one for multipart-upload spillover (ParseMultipartForm writes any
+# bytes past its in-memory budget to os.TempDir(), which defaults to
+# /tmp). A scratch image has no /tmp by default, so the avatar/logo
+# upload would fail with "open /tmp/multipart-...: no such file or
+# directory" the moment a body is larger than the in-RAM budget.
+RUN mkdir -p /tmp/scratch-tmp && chown 1001:1001 /tmp/scratch-tmp && chmod 1777 /tmp/scratch-tmp
 
 # ----- stage 3: final image, FROM scratch -----------------------------------
 FROM scratch
@@ -63,6 +70,7 @@ FROM scratch
 COPY --from=tools  /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=tools  /tmp/passwd                        /etc/passwd
 COPY --from=tools  --chown=1001:1001 /tmp/data        /data
+COPY --from=tools  --chown=1001:1001 /tmp/scratch-tmp /tmp
 COPY --from=builder /out/palmr-server                 /palmr-server
 
 # Seed JSON files (configs.json, providers.json) — the Go entrypoint copies

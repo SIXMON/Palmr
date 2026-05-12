@@ -189,18 +189,20 @@ func (h *Handler) Register(ctx context.Context, in *UserRegisterInput) (*UserReg
 // GET /users
 // -----------------------------------------------------------------------------
 
+// UserListOutput returns a bare JSON array — the frontend types this as
+// `ListUsersResult = AxiosResponse<User[]>` and calls `setUsers(response.data)`
+// directly (apps/web/.../users-management/hooks/use-user-management.ts). Wrapping
+// in `{users:[...]}` breaks `.map`/`.filter`/`.length` on the users page.
 type UserListOutput struct {
-	Body struct {
-		Users []User `json:"users"`
-	}
+	Body []User
 }
 
 func (h *Handler) List(ctx context.Context, _ *struct{}) (*UserListOutput, error) {
 	if _, err := humaauth.EnsureAdmin(ctx, h.DB); err != nil {
 		return nil, apperr.Forbidden(err.Error())
 	}
-	out := &UserListOutput{}
-	if err := h.DB.SelectContext(ctx, &out.Body.Users,
+	out := &UserListOutput{Body: []User{}}
+	if err := h.DB.SelectContext(ctx, &out.Body,
 		`SELECT id, firstName, lastName, username, email, image, isAdmin, isActive, createdAt, updatedAt
 		 FROM users ORDER BY createdAt DESC`); err != nil {
 		return nil, apperr.Internal("list users")
@@ -213,8 +215,13 @@ func (h *Handler) List(ctx context.Context, _ *struct{}) (*UserListOutput, error
 // -----------------------------------------------------------------------------
 
 type GetByIDInput struct{ ID string `path:"id"` }
+
+// GetByIDOutput returns the user as a bare JSON object — matching
+// `GetUserById200 = User`, `ActivateUser200 = User`, `DeactivateUser200 =
+// User` on the frontend. Wrapping it in `{user: …}` would mean those
+// admin pages can't `setUser(response.data)` directly.
 type GetByIDOutput struct {
-	Body struct{ User User `json:"user"` }
+	Body User
 }
 
 func (h *Handler) GetByID(ctx context.Context, in *GetByIDInput) (*GetByIDOutput, error) {
@@ -228,28 +235,62 @@ func (h *Handler) GetByID(ctx context.Context, in *GetByIDInput) (*GetByIDOutput
 		}
 		return nil, apperr.Internal("load user")
 	}
-	out := &GetByIDOutput{}
-	out.Body.User = u
-	return out, nil
+	return &GetByIDOutput{Body: u}, nil
 }
 
 // -----------------------------------------------------------------------------
 // PUT /users — update own profile.
 // -----------------------------------------------------------------------------
 
+// UserUpdateInput matches the frontend's `UpdateUserBody` (apps/web/.../
+// users/types.ts). It's a dual-purpose endpoint:
+//
+//   - Self-edit: the body's `id` is empty or matches the caller's own
+//     user ID. Profile fields can be changed; `isAdmin` is silently
+//     ignored (a non-admin must not be able to flip their own bit).
+//   - Admin-edit: the body's `id` targets another user. We require the
+//     caller to be admin; all fields (including `isAdmin`) are honoured.
+//
+// The legacy Node backend used this same shape — both the profile page
+// and the admin users-management page POST through it.
 type UserUpdateInput struct {
 	Body struct {
+		ID        string  `json:"id,omitempty"`
 		FirstName *string `json:"firstName,omitempty"`
 		LastName  *string `json:"lastName,omitempty"`
+		Username  *string `json:"username,omitempty"`
 		Email     *string `json:"email,omitempty" format:"email"`
+		Image     *string `json:"image,omitempty"`
 		Password  *string `json:"password,omitempty" minLength:"8" maxLength:"72"`
+		IsAdmin   *bool   `json:"isAdmin,omitempty"`
 	}
 }
 
-func (h *Handler) UpdateSelf(ctx context.Context, in *UserUpdateInput) (*GetByIDOutput, error) {
+// UserUpdateOutput returns the refreshed user as a bare JSON object —
+// the frontend types this as `UpdateUser200 = User` (no `{user:…}`
+// wrapper).
+type UserUpdateOutput struct {
+	Body User
+}
+
+func (h *Handler) UpdateSelf(ctx context.Context, in *UserUpdateInput) (*UserUpdateOutput, error) {
 	uc, ok := humaauth.FromContext(ctx)
 	if !ok {
 		return nil, apperr.Unauthorized("missing user context")
+	}
+
+	targetID := in.Body.ID
+	if targetID == "" {
+		targetID = uc.UserID
+	}
+	isSelf := targetID == uc.UserID
+
+	// Editing another user requires admin. Non-admins also can't flip
+	// their own isAdmin bit (silently dropped further down).
+	if !isSelf {
+		if _, err := humaauth.EnsureAdmin(ctx, h.DB); err != nil {
+			return nil, apperr.Forbidden(err.Error())
+		}
 	}
 
 	fields := []string{}
@@ -262,9 +303,17 @@ func (h *Handler) UpdateSelf(ctx context.Context, in *UserUpdateInput) (*GetByID
 		fields = append(fields, "lastName = ?")
 		args = append(args, *in.Body.LastName)
 	}
+	if in.Body.Username != nil {
+		fields = append(fields, "username = ?")
+		args = append(args, *in.Body.Username)
+	}
 	if in.Body.Email != nil {
 		fields = append(fields, "email = ?")
 		args = append(args, strings.ToLower(*in.Body.Email))
+	}
+	if in.Body.Image != nil {
+		fields = append(fields, "image = ?")
+		args = append(args, *in.Body.Image)
 	}
 	if in.Body.Password != nil {
 		hash, err := humaauth.HashPassword(*in.Body.Password, h.BcryptCost)
@@ -274,19 +323,26 @@ func (h *Handler) UpdateSelf(ctx context.Context, in *UserUpdateInput) (*GetByID
 		fields = append(fields, "password = ?")
 		args = append(args, hash)
 	}
+	// isAdmin is admin-only — silently ignored on self-edit so a
+	// compromised XSS in the profile page can't grant itself admin.
+	if in.Body.IsAdmin != nil && !isSelf {
+		fields = append(fields, "isAdmin = ?")
+		args = append(args, *in.Body.IsAdmin)
+	}
 	if len(fields) == 0 {
 		return nil, apperr.BadRequest("nothing to update")
 	}
 	fields = append(fields, "updatedAt = CURRENT_TIMESTAMP")
-	args = append(args, uc.UserID)
+	args = append(args, targetID)
 	q := "UPDATE users SET " + strings.Join(fields, ", ") + " WHERE id = ?"
 	if _, err := h.DB.ExecContext(ctx, q, args...); err != nil {
 		return nil, apperr.Internal("update user")
 	}
-	u, _ := h.loadUser(ctx, uc.UserID)
-	out := &GetByIDOutput{}
-	out.Body.User = u
-	return out, nil
+	u, err := h.loadUser(ctx, targetID)
+	if err != nil {
+		return nil, apperr.NotFound("user not found")
+	}
+	return &UserUpdateOutput{Body: u}, nil
 }
 
 // -----------------------------------------------------------------------------
@@ -338,9 +394,7 @@ func (h *Handler) setActive(ctx context.Context, id string, active bool) (*GetBy
 	if err != nil {
 		return nil, apperr.NotFound("user not found")
 	}
-	out := &GetByIDOutput{}
-	out.Body.User = u
-	return out, nil
+	return &GetByIDOutput{Body: u}, nil
 }
 
 // -----------------------------------------------------------------------------

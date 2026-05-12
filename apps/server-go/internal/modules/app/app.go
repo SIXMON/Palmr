@@ -47,6 +47,35 @@ func Register(api huma.API, h *Handler) {
 		Method: http.MethodGet, Path: "/app/configs/public",
 		Tags: []string{"App"}, OperationID: "getPublicConfigs",
 	}, h.GetPublicConfigs)
+
+	huma.Register(api, huma.Operation{
+		Method: http.MethodGet, Path: "/app/system-info",
+		Tags: []string{"App"}, OperationID: "getSystemInfo",
+	}, h.GetSystemInfo)
+}
+
+// -----------------------------------------------------------------------------
+// GET /app/system-info — tells the admin storage page which backend
+// the server is using. The Go port only ever speaks S3 (MinIO or AWS),
+// so storageProvider is constant — kept for frontend compatibility.
+// -----------------------------------------------------------------------------
+
+type SystemInfoOutput struct {
+	Body struct {
+		StorageProvider string `json:"storageProvider"`
+		S3Enabled       bool   `json:"s3Enabled"`
+	}
+}
+
+// HasExternalS3 is set by main.go at boot. Used here purely so we can
+// honestly report s3Enabled without re-reading env in this package.
+var HasExternalS3 = true
+
+func (h *Handler) GetSystemInfo(ctx context.Context, _ *struct{}) (*SystemInfoOutput, error) {
+	out := &SystemInfoOutput{}
+	out.Body.StorageProvider = "s3"
+	out.Body.S3Enabled = HasExternalS3
+	return out, nil
 }
 
 // RegisterAdmin attaches the admin-only paths under the same root. We
@@ -114,6 +143,8 @@ var sensitiveKeys = map[string]bool{
 
 func (h *Handler) GetPublicConfigs(ctx context.Context, _ *struct{}) (*ConfigsOutput, error) {
 	out := &ConfigsOutput{}
+	// Pre-initialise so an empty result serialises as `[]`, not `null`.
+	out.Body.Configs = []Config{}
 	// `group` is a SQL reserved word in many engines; we Scan into scalars
 	// rather than StructScan to dodge the quoted-identifier round-trip.
 	rows, err := h.DB.QueryContext(ctx, `SELECT key, value, type, "group", updatedAt FROM app_configs ORDER BY key`)
@@ -143,6 +174,8 @@ func (h *Handler) GetAllConfigs(ctx context.Context, _ *struct{}) (*ConfigsOutpu
 		return nil, apperr.Forbidden(err.Error())
 	}
 	out := &ConfigsOutput{}
+	// Pre-initialise so an empty result serialises as `[]`, not `null`.
+	out.Body.Configs = []Config{}
 	rows, err := h.DB.QueryContext(ctx, `SELECT key, value, type, "group", updatedAt FROM app_configs ORDER BY key`)
 	if err != nil {
 		return nil, apperr.Internal("query configs: " + err.Error())

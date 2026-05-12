@@ -322,6 +322,8 @@ func (h *Handler) List(ctx context.Context, _ *FileListInput) (*FileListOutput, 
 		return nil, apperr.Unauthorized(err.Error())
 	}
 	out := &FileListOutput{}
+	// Pre-initialise so an empty result serialises as `[]`, not `null`.
+	out.Body.Files = []File{}
 	if err := h.DB.SelectContext(ctx, &out.Body.Files,
 		`SELECT id, name, description, extension, size, objectName, userId, folderId, createdAt, updatedAt
 		 FROM files WHERE userId = ? ORDER BY createdAt DESC`, uc.UserID); err != nil {

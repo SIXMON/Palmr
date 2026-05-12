@@ -220,6 +220,26 @@ export class StorageService {
       const mountPoint = await this._detectMountPoint(path);
       const targetPath = mountPoint || path;
 
+      // Prefer fs.statfs (Node ≥ 18.15) over shelling out to `df`. It avoids
+      // command injection risk on user-controlled paths and is portable across
+      // platforms. We still keep the legacy commands as a fallback for older
+      // Node versions or when statfs is restricted (rare).
+      try {
+        const statfsFn = (fs.promises as any).statfs as
+          | ((p: string) => Promise<{ bsize: number; blocks: number; bavail: number; bfree: number }>)
+          | undefined;
+        if (statfsFn) {
+          const stats = await statfsFn(targetPath);
+          const total = stats.bsize * stats.blocks;
+          const available = stats.bsize * stats.bavail;
+          if (Number.isFinite(total) && total > 0) {
+            return { total, available, mountPoint: mountPoint || undefined };
+          }
+        }
+      } catch {
+        // fall through to legacy command-based detection
+      }
+
       const commandsToTry =
         process.platform === "win32"
           ? ["wmic logicaldisk get size,freespace,caption"]

@@ -2,6 +2,7 @@ import { FastifyInstance } from "fastify";
 import { z } from "zod";
 
 import { requireAuth } from "../../shared/auth";
+import { validatePasswordMiddleware } from "../user/middleware";
 import { InviteController } from "./controller";
 import {
   CreateInviteTokenResponseSchema,
@@ -55,6 +56,7 @@ export async function inviteRoutes(app: FastifyInstance) {
   app.post(
     "/register-with-invite",
     {
+      preValidation: validatePasswordMiddleware,
       schema: {
         tags: ["Invite"],
         operationId: "registerWithInvite",

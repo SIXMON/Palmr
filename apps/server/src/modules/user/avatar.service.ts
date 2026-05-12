@@ -2,12 +2,23 @@ import sharp from "sharp";
 
 import { prisma } from "../../shared/prisma";
 
+/**
+ * Image formats accepted for avatars/logos. SVG is intentionally excluded:
+ * an SVG can carry inline <script> / event handlers and is rendered as XML
+ * by browsers, so accepting it here would let an attacker store an XSS
+ * payload behind our domain.
+ */
+const ALLOWED_IMAGE_FORMATS = new Set(["jpeg", "png", "webp", "gif", "avif", "tiff", "heif"]);
+
 export class AvatarService {
   async uploadAvatar(buffer: Buffer): Promise<string> {
     try {
       const metadata = await sharp(buffer).metadata();
       if (!metadata.width || !metadata.height) {
         throw new Error("Invalid image file");
+      }
+      if (!metadata.format || !ALLOWED_IMAGE_FORMATS.has(metadata.format)) {
+        throw new Error(`Unsupported image format: ${metadata.format ?? "unknown"}`);
       }
 
       const webpBuffer = await sharp(buffer)
@@ -18,7 +29,6 @@ export class AvatarService {
         .webp({
           quality: 60,
           effort: 6,
-          nearLossless: true,
           alphaQuality: 100,
           lossless: true,
         })

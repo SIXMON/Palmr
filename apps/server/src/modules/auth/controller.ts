@@ -1,6 +1,8 @@
 import { FastifyReply, FastifyRequest } from "fastify";
 
-import { env } from "../../env";
+import { authCookieOptions } from "../../shared/cookies";
+import { revokeJti } from "../../shared/jwt-revocation";
+import { signSessionJwt } from "../../shared/jwt-sign";
 import { ConfigService } from "../config/service";
 import {
   CompleteTwoFactorLoginSchema,
@@ -15,12 +17,13 @@ export class AuthController {
   private configService = new ConfigService();
 
   private getClientInfo(request: FastifyRequest) {
-    const realIP = request.headers["x-real-ip"] as string;
-    const realUserAgent = request.headers["x-user-agent"] as string;
-
-    const userAgent = realUserAgent || request.headers["user-agent"] || "";
-    const ipAddress = realIP || request.ip || request.socket.remoteAddress || "";
-
+    // Use Fastify's request.ip — with trustProxy enabled, it already honours
+    // X-Forwarded-For from the configured proxy chain. Do NOT trust custom
+    // x-real-ip / x-user-agent headers: any client can forge them, which would
+    // let an attacker bypass the per-IP throttle and forge trusted-device
+    // identifiers.
+    const userAgent = (request.headers["user-agent"] as string | undefined) || "";
+    const ipAddress = request.ip || request.socket.remoteAddress || "";
     return { userAgent, ipAddress };
   }
 
@@ -35,17 +38,12 @@ export class AuthController {
       }
 
       const user = result;
-      const token = await request.jwtSign({
+      const token = await signSessionJwt(request, {
         userId: user.id,
         isAdmin: user.isAdmin,
       });
 
-      reply.setCookie("token", token, {
-        httpOnly: true,
-        path: "/",
-        secure: env.SECURE_SITE === "true" ? true : false,
-        sameSite: env.SECURE_SITE === "true" ? "lax" : "strict",
-      });
+      reply.setCookie("token", token, authCookieOptions);
 
       return reply.send({ user });
     } catch (error: any) {
@@ -65,17 +63,12 @@ export class AuthController {
         ipAddress
       );
 
-      const token = await request.jwtSign({
+      const token = await signSessionJwt(request, {
         userId: user.id,
         isAdmin: user.isAdmin,
       });
 
-      reply.setCookie("token", token, {
-        httpOnly: true,
-        path: "/",
-        secure: env.SECURE_SITE === "true" ? true : false,
-        sameSite: env.SECURE_SITE === "true" ? "lax" : "strict",
-      });
+      reply.setCookie("token", token, authCookieOptions);
 
       return reply.send({ user });
     } catch (error: any) {
@@ -84,6 +77,18 @@ export class AuthController {
   }
 
   async logout(request: FastifyRequest, reply: FastifyReply) {
+    // Best-effort: revoke the presented JWT's jti so further requests
+    // carrying the same cookie/Authorization header are rejected even
+    // before its natural expiry.
+    try {
+      await request.jwtVerify();
+      const payload = (request as any).user;
+      if (payload?.jti && typeof payload?.exp === "number") {
+        revokeJti(payload.jti, payload.exp);
+      }
+    } catch {
+      // No valid token — nothing to revoke; still clear the cookie below.
+    }
     reply.clearCookie("token", { path: "/" });
     return reply.send({ message: "Logout successful" });
   }

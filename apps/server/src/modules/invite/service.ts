@@ -1,6 +1,7 @@
 import { randomBytes } from "crypto";
 import bcrypt from "bcryptjs";
 
+import { BCRYPT_COST } from "../../shared/bcrypt-cost";
 import { prisma } from "../../shared/prisma";
 
 export class InviteService {
@@ -64,7 +65,7 @@ export class InviteService {
       }
     }
 
-    const hashedPassword = await bcrypt.hash(data.password, 10);
+    const hashedPassword = await bcrypt.hash(data.password, BCRYPT_COST);
 
     // CRITICAL: claim the invite token atomically. updateMany returns
     // count > 0 only if the token is unused and not expired, so two

@@ -32,6 +32,16 @@ export class FolderController {
         if (!parentFolder) {
           return reply.status(400).send({ error: "Parent folder not found or access denied" });
         }
+
+        // Reject creating a folder deeper than MAX_FOLDER_DEPTH. Without
+        // this, an attacker can create an unbounded parent chain that DoS's
+        // recursive ops (calculateFolderSize, getAllFilesInFolder, etc.).
+        const depth = await this.measureFolderDepth(input.parentId, userId);
+        if (depth + 1 > FolderController.MAX_FOLDER_DEPTH) {
+          return reply
+            .status(400)
+            .send({ error: `Folder nesting limit (${FolderController.MAX_FOLDER_DEPTH}) reached` });
+        }
       }
 
       // Check for duplicates and auto-rename if necessary
@@ -138,24 +148,48 @@ export class FolderController {
       const { parentId, recursive: recursiveStr } = input;
       const recursive = recursiveStr === "false" ? false : true;
 
+      const targetParentId = parentId === "null" || parentId === "" || !parentId ? null : parentId;
       let folders: any[];
 
       if (recursive) {
-        folders = await prisma.folder.findMany({
+        // recursive=true means "every descendant under targetParentId" — not
+        // "every folder owned by the user". The previous implementation
+        // ignored the parentId filter, which made the parameter misleading.
+        const allUserFolders = await prisma.folder.findMany({
           where: { userId },
           include: {
             _count: {
-              select: {
-                files: true,
-                children: true,
-              },
+              select: { files: true, children: true },
             },
           },
           orderBy: [{ name: "asc" }],
         });
+
+        if (targetParentId === null) {
+          folders = allUserFolders;
+        } else {
+          const childrenByParent = new Map<string | null, any[]>();
+          for (const f of allUserFolders) {
+            const arr = childrenByParent.get(f.parentId) ?? [];
+            arr.push(f);
+            childrenByParent.set(f.parentId, arr);
+          }
+          const collected: any[] = [];
+          const stack = [targetParentId];
+          const visited = new Set<string>();
+          while (stack.length) {
+            const pid = stack.pop()!;
+            if (visited.has(pid)) continue;
+            visited.add(pid);
+            for (const child of childrenByParent.get(pid) ?? []) {
+              collected.push(child);
+              stack.push(child.id);
+            }
+          }
+          folders = collected;
+        }
       } else {
         // Get only direct children of specified parent
-        const targetParentId = parentId === "null" || parentId === "" || !parentId ? null : parentId;
         folders = await prisma.folder.findMany({
           where: {
             userId,
@@ -163,10 +197,7 @@ export class FolderController {
           },
           include: {
             _count: {
-              select: {
-                files: true,
-                children: true,
-              },
+              select: { files: true, children: true },
             },
           },
           orderBy: [{ name: "asc" }],
@@ -304,6 +335,14 @@ export class FolderController {
         if (await this.isDescendantOf(validatedInput.parentId, id, userId)) {
           return reply.status(400).send({ error: "Cannot move a folder into itself or its subfolders" });
         }
+
+        const parentDepth = await this.measureFolderDepth(validatedInput.parentId, userId);
+        const movedSubtreeDepth = await this.measureSubtreeDepth(id, userId);
+        if (parentDepth + 1 + movedSubtreeDepth > FolderController.MAX_FOLDER_DEPTH) {
+          return reply
+            .status(400)
+            .send({ error: `Folder nesting limit (${FolderController.MAX_FOLDER_DEPTH}) reached` });
+        }
       }
 
       const updatedFolder = await prisma.folder.update({
@@ -389,12 +428,27 @@ export class FolderController {
     }
   }
 
+  /**
+   * Walks the parent chain of `potentialDescendantId` and returns true if it
+   * eventually reaches `ancestorId`. Guards against:
+   *   - corrupted data (parent cycles) via a `visited` set
+   *   - pathologically deep trees via MAX_DEPTH (also enforced at create time)
+   */
   private async isDescendantOf(potentialDescendantId: string, ancestorId: string, userId: string): Promise<boolean> {
     let currentId: string | null = potentialDescendantId;
+    const visited = new Set<string>();
+    let steps = 0;
 
     while (currentId) {
       if (currentId === ancestorId) {
         return true;
+      }
+      if (visited.has(currentId)) {
+        return false; // cycle in DB — defensive
+      }
+      visited.add(currentId);
+      if (++steps > FolderController.MAX_FOLDER_DEPTH) {
+        return false;
       }
 
       const folder: { parentId: string | null } | null = await prisma.folder.findFirst({
@@ -407,4 +461,41 @@ export class FolderController {
 
     return false;
   }
+
+  /** Depth from the folder up to a root parent (0 = root). */
+  private async measureFolderDepth(folderId: string, userId: string): Promise<number> {
+    let currentId: string | null = folderId;
+    const visited = new Set<string>();
+    let depth = 0;
+    while (currentId) {
+      if (visited.has(currentId)) break;
+      visited.add(currentId);
+      if (depth > FolderController.MAX_FOLDER_DEPTH) break;
+      const folder: { parentId: string | null } | null = await prisma.folder.findFirst({
+        where: { id: currentId, userId },
+        select: { parentId: true },
+      });
+      if (!folder || !folder.parentId) break;
+      currentId = folder.parentId;
+      depth += 1;
+    }
+    return depth;
+  }
+
+  /** Depth of the deepest descendant under `folderId` (0 = leaf). */
+  private async measureSubtreeDepth(folderId: string, userId: string): Promise<number> {
+    const children = await prisma.folder.findMany({
+      where: { parentId: folderId, userId },
+      select: { id: true },
+    });
+    if (children.length === 0) return 0;
+    let maxChild = 0;
+    for (const c of children) {
+      const d = await this.measureSubtreeDepth(c.id, userId);
+      if (d > maxChild) maxChild = d;
+    }
+    return maxChild + 1;
+  }
+
+  static readonly MAX_FOLDER_DEPTH = 64;
 }

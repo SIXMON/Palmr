@@ -253,11 +253,37 @@ export class ReverseShareService {
   }
 
   /**
+   * Reject the presigned URL request if the file fails the reverse-share's
+   * size/type/count constraints. Without this pre-check an attacker can
+   * trigger an upload that we'll later refuse to register — but the bytes
+   * are already in S3 and consume the owner's quota.
+   */
+  private assertUploadConstraintsAtPresign(
+    reverseShare: any,
+    extension: string,
+    size: number | undefined,
+    currentFileCount: number
+  ) {
+    if (reverseShare.maxFiles && currentFileCount >= reverseShare.maxFiles) {
+      throw new Error("Maximum number of files reached");
+    }
+    if (typeof size === "number" && reverseShare.maxFileSize && BigInt(size) > reverseShare.maxFileSize) {
+      throw new Error("File size exceeds limit");
+    }
+    if (reverseShare.allowedFileTypes) {
+      const allowed = reverseShare.allowedFileTypes.split(",").map((t: string) => t.trim().toLowerCase());
+      if (!allowed.includes(extension.toLowerCase())) {
+        throw new Error("File type not allowed");
+      }
+    }
+  }
+
+  /**
    * CRITICAL: the client must NOT supply objectName. Generate it server-side
    * from filename+extension and remember the mapping for register-file.
    * Otherwise an attacker can overwrite arbitrary S3 objects.
    */
-  async getPresignedUrl(id: string, filename: string, extension: string, password?: string) {
+  async getPresignedUrl(id: string, filename: string, extension: string, size: number | undefined, password?: string) {
     const reverseShare = await this.reverseShareRepository.findById(id);
     if (!reverseShare) {
       throw new Error("Reverse share not found");
@@ -274,6 +300,9 @@ export class ReverseShareService {
       if (!isValidPassword) throw new Error("Invalid password");
     }
 
+    const currentFileCount = await this.reverseShareRepository.countFilesByReverseShareId(reverseShare.id);
+    this.assertUploadConstraintsAtPresign(reverseShare, extension, size, currentFileCount);
+
     const objectName = this.generateObjectName(reverseShare.id, filename, extension);
     this.rememberObjectName(reverseShare.id, objectName);
 
@@ -282,8 +311,17 @@ export class ReverseShareService {
     return { url, objectName, expiresIn: expires };
   }
 
-  async getPresignedUrlByAlias(alias: string, filename: string, extension: string, password?: string) {
+  async getPresignedUrlByAlias(
+    alias: string,
+    filename: string,
+    extension: string,
+    size: number | undefined,
+    password?: string
+  ) {
     const reverseShare = await this.validateReverseShareAccessByAlias(alias, password);
+    const currentFileCount = await this.reverseShareRepository.countFilesByReverseShareId(reverseShare.id);
+    this.assertUploadConstraintsAtPresign(reverseShare, extension, size, currentFileCount);
+
     const objectName = this.generateObjectName(alias, filename, extension);
     this.rememberObjectName(reverseShare.id, objectName);
 
@@ -335,17 +373,22 @@ export class ReverseShareService {
     // (would let them attach another user's file to this reverse share).
     this.assertObjectNameBelongsToReverseShare(reverseShareId, fileData.objectName);
 
-    const currentFileCount = await this.reverseShareRepository.countFilesByReverseShareId(reverseShareId);
-    this.validateUploadConstraints(reverseShare, fileData, currentFileCount);
+    if (reverseShare.maxFileSize && BigInt(fileData.size) > reverseShare.maxFileSize) {
+      throw new Error("File size exceeds limit");
+    }
+    if (reverseShare.allowedFileTypes) {
+      const allowed = reverseShare.allowedFileTypes.split(",").map((t: string) => t.trim().toLowerCase());
+      if (!allowed.includes(fileData.extension.toLowerCase())) {
+        throw new Error("File type not allowed");
+      }
+    }
 
-    const file = await this.reverseShareRepository.createFile(reverseShareId, {
-      ...fileData,
-      size: BigInt(fileData.size),
-    });
+    // Reject duplicate registration of the same objectName (we already
+    // consume the pending entry below, but the check protects against a
+    // concurrent double-submit replaying the same objectName).
+    const file = await this.createReverseShareFileWithLimit(reverseShare, fileData);
 
-    // One-shot use of the pending objectName
     this.pendingObjectNames.delete(fileData.objectName);
-
     this.addFileToUploadSession(reverseShare, fileData);
 
     return this.formatFileResponse(file);
@@ -356,19 +399,64 @@ export class ReverseShareService {
 
     this.assertObjectNameBelongsToReverseShare(reverseShare.id, fileData.objectName);
 
-    const currentFileCount = await this.reverseShareRepository.countFilesByReverseShareId(reverseShare.id);
-    this.validateUploadConstraints(reverseShare, fileData, currentFileCount);
+    if (reverseShare.maxFileSize && BigInt(fileData.size) > reverseShare.maxFileSize) {
+      throw new Error("File size exceeds limit");
+    }
+    if (reverseShare.allowedFileTypes) {
+      const allowed = reverseShare.allowedFileTypes.split(",").map((t: string) => t.trim().toLowerCase());
+      if (!allowed.includes(fileData.extension.toLowerCase())) {
+        throw new Error("File type not allowed");
+      }
+    }
 
-    const file = await this.reverseShareRepository.createFile(reverseShare.id, {
-      ...fileData,
-      size: BigInt(fileData.size),
-    });
+    const file = await this.createReverseShareFileWithLimit(reverseShare, fileData);
 
     this.pendingObjectNames.delete(fileData.objectName);
-
     this.addFileToUploadSession(reverseShare, fileData);
 
     return this.formatFileResponse(file);
+  }
+
+  /**
+   * Create the file inside a transaction, then verify the post-insert count
+   * is still under maxFiles. If it isn't, roll back. This closes the race
+   * where N parallel register-file calls all see currentFileCount < maxFiles
+   * and each create a row.
+   */
+  private async createReverseShareFileWithLimit(reverseShare: any, fileData: UploadToReverseShareInput) {
+    const reverseShareId = reverseShare.id;
+    return await prisma.$transaction(async (tx) => {
+      // Reject a second registration of the same objectName.
+      const existing = await tx.reverseShareFile.findFirst({
+        where: { reverseShareId, objectName: fileData.objectName },
+        select: { id: true },
+      });
+      if (existing) {
+        throw new Error("This file is already registered");
+      }
+
+      const created = await tx.reverseShareFile.create({
+        data: {
+          name: fileData.name,
+          description: fileData.description,
+          extension: fileData.extension,
+          size: BigInt(fileData.size),
+          objectName: fileData.objectName,
+          uploaderEmail: fileData.uploaderEmail,
+          uploaderName: fileData.uploaderName,
+          reverseShareId,
+        },
+      });
+
+      if (reverseShare.maxFiles) {
+        const newCount = await tx.reverseShareFile.count({ where: { reverseShareId } });
+        if (newCount > reverseShare.maxFiles) {
+          throw new Error("Maximum number of files reached");
+        }
+      }
+
+      return created;
+    });
   }
 
   async getFileInfo(fileId: string, creatorId: string) {

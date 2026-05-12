@@ -118,6 +118,12 @@ export const GetPresignedUrlSchema = z.object({
     .max(20)
     .regex(/^[A-Za-z0-9]+$/, "Extension must be alphanumeric")
     .describe("File extension (no leading dot)"),
+  size: z
+    .number()
+    .int()
+    .nonnegative()
+    .optional()
+    .describe("File size in bytes — used to reject oversized files before any upload happens"),
 });
 
 export const UpdateReverseShareFileSchema = z.object({

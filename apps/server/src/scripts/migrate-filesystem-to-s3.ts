@@ -231,20 +231,44 @@ export class FilesystemToS3Migrator {
       if (s3Client) {
         const fileStream = createReadStream(fullPath);
 
-        await s3Client.send(
-          new PutObjectCommand({
-            Bucket: bucketName,
-            Key: objectName,
-            Body: fileStream,
-          })
-        );
+        try {
+          await s3Client.send(
+            new PutObjectCommand({
+              Bucket: bucketName,
+              Key: objectName,
+              Body: fileStream,
+            })
+          );
+        } catch (uploadError) {
+          // Best-effort cleanup so we don't leave a half-uploaded blob in S3.
+          // The HeadObject check at the top of the next run will skip these
+          // if they actually completed despite the error.
+          try {
+            const { DeleteObjectCommand } = await import("@aws-sdk/client-s3");
+            await s3Client.send(new DeleteObjectCommand({ Bucket: bucketName, Key: objectName }));
+          } catch {
+            // ignore — cleanup is best-effort
+          }
+          throw uploadError;
+        }
 
         this.stats.migratedFiles++;
         this.stats.totalSizeBytes += stats.size;
 
         console.log(`[MIGRATION] ✓ Migrated: ${objectName} (${Math.round(stats.size / 1024)}KB)`);
 
-        // Delete filesystem file after successful migration to free up space
+        // Verify the S3 object is readable before deleting the local copy.
+        // Without this we risk losing the only existing copy if some S3
+        // backends acknowledge a PUT before fsync.
+        try {
+          const { HeadObjectCommand } = await import("@aws-sdk/client-s3");
+          await s3Client.send(new HeadObjectCommand({ Bucket: bucketName, Key: objectName }));
+        } catch (verifyError) {
+          console.warn(`[MIGRATION] S3 object not readable yet, keeping local copy of ${relativeFilePath}`);
+          throw verifyError;
+        }
+
+        // Delete filesystem file after confirmed migration to free up space.
         try {
           await fs.unlink(fullPath);
           console.log(`[MIGRATION] 🗑️  Deleted from filesystem: ${relativeFilePath}`);

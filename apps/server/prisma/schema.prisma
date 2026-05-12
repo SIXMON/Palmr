@@ -71,8 +71,11 @@ model Share {
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
-  creatorId String?
-  creator   User?   @relation(fields: [creatorId], references: [id], onDelete: SetNull)
+  // Cascade rather than SetNull: a share with a NULL creatorId becomes
+  // permanently immutable (every ownership check fails) and just pollutes
+  // the table. When a user is deleted, their shares go with them.
+  creatorId String
+  creator   User   @relation(fields: [creatorId], references: [id], onDelete: Cascade)
 
   securityId String        @unique
   security   ShareSecurity @relation(fields: [securityId], references: [id])
@@ -280,7 +283,7 @@ model TrustedDevice {
   id         String   @id @default(cuid())
   userId     String
   user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  deviceHash String   @unique
+  deviceHash String
   deviceName String?
   userAgent  String?
   ipAddress  String?
@@ -289,6 +292,7 @@ model TrustedDevice {
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
+  @@unique([userId, deviceHash])
   @@map("trusted_devices")
 }
 

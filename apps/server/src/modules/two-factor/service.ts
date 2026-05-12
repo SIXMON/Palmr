@@ -3,19 +3,42 @@ import bcrypt from "bcryptjs";
 import QRCode from "qrcode";
 import speakeasy from "speakeasy";
 
+import { BCRYPT_COST } from "../../shared/bcrypt-cost";
 import { prisma } from "../../shared/prisma";
-import { ConfigService } from "../config/service";
+import { decryptSecret, encryptSecret } from "../../shared/secret-crypto";
 
-interface BackupCode {
-  code: string;
+interface BackupCodeRecord {
+  hash: string;
   used: boolean;
 }
 
-export class TwoFactorService {
-  private configService = new ConfigService();
+const SETUP_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
+/**
+ * Pending TOTP secrets for users currently going through enrolment. We store
+ * them server-side (keyed by userId) and let `verifySetup` read them by id
+ * rather than accepting an attacker-supplied `secret` from the client.
+ *
+ * Single-instance only — fine for the use case (a user finishes setup within
+ * a few minutes from the same instance they started on).
+ */
+const pendingSetups = new Map<string, { secret: string; expiresAt: number }>();
+
+setInterval(
+  () => {
+    const now = Date.now();
+    for (const [k, v] of pendingSetups.entries()) {
+      if (v.expiresAt < now) pendingSetups.delete(k);
+    }
+  },
+  5 * 60 * 1000
+).unref?.();
+
+export class TwoFactorService {
   /**
-   * Generate a new 2FA secret and QR code for setup
+   * Generate a new 2FA secret and QR code for setup.
+   * The secret is held server-side (pendingSetups) and is NOT returned to the
+   * client; only the QR code data URL is. verifySetup() looks it up by userId.
    */
   async generateSetup(userId: string, userEmail: string, appName?: string) {
     const user = await prisma.user.findUnique({
@@ -39,18 +62,25 @@ export class TwoFactorService {
 
     const qrCodeUrl = await QRCode.toDataURL(secret.otpauth_url || "");
 
-    return {
+    pendingSetups.set(userId, {
       secret: secret.base32,
+      expiresAt: Date.now() + SETUP_TTL_MS,
+    });
+
+    return {
+      // We keep returning manualEntryKey for users who can't scan, but we
+      // accept it back ONLY for the duration of pendingSetups[userId].
       qrCode: qrCodeUrl,
       manualEntryKey: secret.base32,
-      backupCodes: await this.generateBackupCodes(),
+      // backupCodes are also generated lazily by verifySetup so we don't
+      // accidentally show codes for a setup that the user abandons.
     };
   }
 
   /**
-   * Verify setup token and enable 2FA
+   * Verify setup token and enable 2FA using the server-stored pending secret.
    */
-  async verifySetup(userId: string, token: string, secret: string) {
+  async verifySetup(userId: string, token: string) {
     const user = await prisma.user.findUnique({
       where: { id: userId },
       select: { id: true, twoFactorEnabled: true },
@@ -59,15 +89,19 @@ export class TwoFactorService {
     if (!user) {
       throw new Error("User not found");
     }
-
     if (user.twoFactorEnabled) {
       throw new Error("Two-factor authentication is already enabled");
     }
 
+    const pending = pendingSetups.get(userId);
+    if (!pending || pending.expiresAt < Date.now()) {
+      throw new Error("2FA setup session expired. Please start again.");
+    }
+
     const verified = speakeasy.totp.verify({
-      secret: secret,
+      secret: pending.secret,
       encoding: "base32",
-      token: token,
+      token,
       window: 1,
     });
 
@@ -75,26 +109,29 @@ export class TwoFactorService {
       throw new Error("Invalid verification code");
     }
 
-    const backupCodes = await this.generateBackupCodes();
+    const { records: backupRecords, plain: backupPlain } = await this.generateBackupCodes();
+    const encryptedSecret = await encryptSecret(pending.secret);
 
     await prisma.user.update({
       where: { id: userId },
       data: {
         twoFactorEnabled: true,
-        twoFactorSecret: secret,
-        twoFactorBackupCodes: JSON.stringify(backupCodes),
+        twoFactorSecret: encryptedSecret,
+        twoFactorBackupCodes: JSON.stringify(backupRecords),
         twoFactorVerified: true,
       },
     });
 
+    pendingSetups.delete(userId);
+
     return {
       success: true,
-      backupCodes: backupCodes.map((bc) => bc.code),
+      backupCodes: backupPlain,
     };
   }
 
   /**
-   * Verify a 2FA token during login
+   * Verify a 2FA token during login (TOTP or one-time backup code).
    */
   async verifyToken(userId: string, token: string) {
     const user = await prisma.user.findUnique({
@@ -110,37 +147,48 @@ export class TwoFactorService {
     if (!user) {
       throw new Error("User not found");
     }
-
     if (!user.twoFactorEnabled || !user.twoFactorSecret) {
       throw new Error("Two-factor authentication is not enabled");
     }
 
+    const totpSecret = await decryptSecret(user.twoFactorSecret);
     const verified = speakeasy.totp.verify({
-      secret: user.twoFactorSecret,
+      secret: totpSecret,
       encoding: "base32",
-      token: token,
+      token,
       window: 1,
     });
 
     if (verified) {
+      // Opportunistic re-encryption: if the secret was stored plaintext
+      // (legacy seeded value), upgrade it now that we've validated it works.
+      if (!user.twoFactorSecret.startsWith("v1:")) {
+        const encrypted = await encryptSecret(totpSecret);
+        await prisma.user.update({
+          where: { id: userId },
+          data: { twoFactorSecret: encrypted },
+        });
+      }
       return { success: true, method: "totp" };
     }
 
     if (user.twoFactorBackupCodes) {
-      const backupCodes: BackupCode[] = JSON.parse(user.twoFactorBackupCodes);
-      const backupCodeIndex = backupCodes.findIndex((bc) => bc.code === token && !bc.used);
+      const codes: BackupCodeRecord[] = this.parseBackupCodes(user.twoFactorBackupCodes);
 
-      if (backupCodeIndex !== -1) {
-        backupCodes[backupCodeIndex].used = true;
-
-        await prisma.user.update({
-          where: { id: userId },
-          data: {
-            twoFactorBackupCodes: JSON.stringify(backupCodes),
-          },
-        });
-
-        return { success: true, method: "backup" };
+      for (let i = 0; i < codes.length; i++) {
+        if (codes[i].used) continue;
+        // bcrypt.compare is constant-time relative to a fixed-length input.
+        // We deliberately probe every code even after a match so the total
+        // time doesn't leak the position of the matching code.
+        const match = await bcrypt.compare(token, codes[i].hash);
+        if (match) {
+          codes[i].used = true;
+          await prisma.user.update({
+            where: { id: userId },
+            data: { twoFactorBackupCodes: JSON.stringify(codes) },
+          });
+          return { success: true, method: "backup" };
+        }
       }
     }
 
@@ -148,37 +196,25 @@ export class TwoFactorService {
   }
 
   /**
-   * Disable 2FA for a user
+   * Disable 2FA for a user (requires the current password).
    */
   async disable2FA(userId: string, password: string) {
     const user = await prisma.user.findUnique({
       where: { id: userId },
-      select: {
-        id: true,
-        password: true,
-        twoFactorEnabled: true,
-      },
+      select: { id: true, password: true, twoFactorEnabled: true },
     });
 
     if (!user) {
       throw new Error("User not found");
     }
-
     if (!user.twoFactorEnabled) {
       throw new Error("Two-factor authentication is not enabled");
     }
-
     if (!user.password) {
       throw new Error("Password verification required");
     }
 
-    let isValidPassword = false;
-    try {
-      isValidPassword = await bcrypt.compare(password, user.password);
-    } catch (error) {
-      console.error("bcrypt.compare error:", error);
-      throw new Error("Password verification failed");
-    }
+    const isValidPassword = await bcrypt.compare(password, user.password);
     if (!isValidPassword) {
       throw new Error("Invalid password");
     }
@@ -197,37 +233,40 @@ export class TwoFactorService {
   }
 
   /**
-   * Generate new backup codes
+   * Generate new backup codes. Requires the user's password as a reauth step
+   * so a stolen JWT alone cannot re-issue codes (which would lock the
+   * legitimate user out and grant the attacker persistent backup access).
    */
-  async generateNewBackupCodes(userId: string) {
+  async generateNewBackupCodes(userId: string, password: string) {
     const user = await prisma.user.findUnique({
       where: { id: userId },
-      select: { id: true, twoFactorEnabled: true },
+      select: { id: true, password: true, twoFactorEnabled: true },
     });
 
     if (!user) {
       throw new Error("User not found");
     }
-
     if (!user.twoFactorEnabled) {
       throw new Error("Two-factor authentication is not enabled");
     }
+    if (!user.password) {
+      throw new Error("Password verification required");
+    }
 
-    const backupCodes = await this.generateBackupCodes();
+    const ok = await bcrypt.compare(password, user.password);
+    if (!ok) {
+      throw new Error("Invalid password");
+    }
 
+    const { records, plain } = await this.generateBackupCodes();
     await prisma.user.update({
       where: { id: userId },
-      data: {
-        twoFactorBackupCodes: JSON.stringify(backupCodes),
-      },
+      data: { twoFactorBackupCodes: JSON.stringify(records) },
     });
 
-    return backupCodes.map((bc) => bc.code);
+    return plain;
   }
 
-  /**
-   * Get 2FA status for a user
-   */
   async getStatus(userId: string) {
     const user = await prisma.user.findUnique({
       where: { id: userId },
@@ -245,8 +284,8 @@ export class TwoFactorService {
 
     let availableBackupCodes = 0;
     if (user.twoFactorBackupCodes) {
-      const backupCodes: BackupCode[] = JSON.parse(user.twoFactorBackupCodes);
-      availableBackupCodes = backupCodes.filter((bc) => !bc.used).length;
+      const codes = this.parseBackupCodes(user.twoFactorBackupCodes);
+      availableBackupCodes = codes.filter((bc) => !bc.used).length;
     }
 
     return {
@@ -256,21 +295,35 @@ export class TwoFactorService {
     };
   }
 
-  /**
-   * Generate backup codes
-   */
-  private async generateBackupCodes(): Promise<BackupCode[]> {
-    const codes: BackupCode[] = [];
-
+  private async generateBackupCodes(): Promise<{ records: BackupCodeRecord[]; plain: string[] }> {
+    const records: BackupCodeRecord[] = [];
+    const plain: string[] = [];
     for (let i = 0; i < 10; i++) {
-      const code = crypto.randomBytes(4).toString("hex").toUpperCase();
-      codes.push({
-        code: code.match(/.{1,4}/g)?.join("-") || code,
-        used: false,
-      });
+      const raw = crypto.randomBytes(4).toString("hex").toUpperCase();
+      const code = raw.match(/.{1,4}/g)?.join("-") || raw;
+      plain.push(code);
+      records.push({ hash: await bcrypt.hash(code, BCRYPT_COST), used: false });
     }
+    return { records, plain };
+  }
 
-    return codes;
+  /**
+   * Parse the JSON-encoded backup codes column. Older rows stored
+   * `{code, used}` with plaintext codes — those are dropped (marked used) on
+   * read; the user must regenerate codes via /2fa/backup-codes after this
+   * security upgrade. We intentionally don't keep verifying plaintext codes:
+   * the whole point of this change is that codes are never compared in
+   * cleartext anymore.
+   */
+  private parseBackupCodes(value: string): BackupCodeRecord[] {
+    const parsed = JSON.parse(value);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((entry: any) => {
+      if (typeof entry?.hash === "string" && entry.hash.startsWith("$2")) {
+        return { hash: entry.hash, used: !!entry.used };
+      }
+      return { hash: "", used: true };
+    });
   }
 
   /**

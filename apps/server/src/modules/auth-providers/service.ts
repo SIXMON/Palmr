@@ -690,7 +690,7 @@ export class AuthProvidersService {
       );
     }
 
-    return await this.createNewUserWithProvider(userInfo, provider.id, String(externalId));
+    return await this.createNewUserWithProvider(userInfo, provider.id, String(externalId), provider);
   }
 
   private async findExistingAuthProvider(providerId: string, externalId: string) {
@@ -770,8 +770,35 @@ export class AuthProvidersService {
     return { firstName, lastName };
   }
 
-  private async createNewUserWithProvider(userInfo: ProviderUserInfo, providerId: string, externalId: string) {
+  /**
+   * Whether the given email should be promoted to admin based on the
+   * provider's `adminEmailDomains` (comma-separated list of domain
+   * suffixes, e.g. "company.com, partner.net").
+   *
+   * Only honoured when the IdP also asserted email_verified=true; the
+   * unverified branch is already rejected upstream in findOrCreateUser.
+   */
+  private shouldBeAdminFromProvider(provider: any, email: string): boolean {
+    const raw = provider?.adminEmailDomains;
+    if (!raw || typeof raw !== "string") return false;
+    const domain = email.split("@")[1]?.toLowerCase();
+    if (!domain) return false;
+    return raw
+      .split(",")
+      .map((d: string) => d.trim().toLowerCase())
+      .filter((d: string) => d.length > 0)
+      .some((allowed: string) => domain === allowed);
+  }
+
+  private async createNewUserWithProvider(
+    userInfo: ProviderUserInfo,
+    providerId: string,
+    externalId: string,
+    provider: any
+  ) {
     const { firstName, lastName } = this.generateUserNames(userInfo);
+
+    const isAdmin = this.shouldBeAdminFromProvider(provider, userInfo.email);
 
     return await prisma.user.create({
       data: {
@@ -780,7 +807,7 @@ export class AuthProvidersService {
         firstName,
         lastName,
         image: userInfo.avatar || null,
-        isAdmin: false,
+        isAdmin,
         authProviders: {
           create: {
             providerId,

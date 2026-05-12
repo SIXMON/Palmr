@@ -1,6 +1,7 @@
 import { PrismaClient } from "@prisma/client";
 import bcrypt from "bcryptjs";
 
+import { BCRYPT_COST } from "../../shared/bcrypt-cost";
 import { RegisterUserInput, UserResponseSchema } from "./dto";
 import { IUserRepository, PrismaUserRepository } from "./repository";
 
@@ -34,7 +35,7 @@ export class UserService {
     const usersCount = await prisma.user.count();
     const isAdmin = usersCount === 0;
 
-    const hashedPassword = await bcrypt.hash(data.password, 10);
+    const hashedPassword = await bcrypt.hash(data.password, BCRYPT_COST);
     const user = await this.userRepository.createUser({
       firstName: data.firstName,
       lastName: data.lastName,
@@ -67,7 +68,7 @@ export class UserService {
     const updateData: any = { ...rest };
 
     if (password) {
-      updateData.password = await bcrypt.hash(password, 10);
+      updateData.password = await bcrypt.hash(password, BCRYPT_COST);
     }
 
     const user = await this.userRepository.updateUser({

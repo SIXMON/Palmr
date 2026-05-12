@@ -1,6 +1,8 @@
 import crypto from "node:crypto";
 import bcrypt from "bcryptjs";
 
+import { BCRYPT_COST } from "../../shared/bcrypt-cost";
+import { checkBlocked, clearKey, recordFailure } from "../../shared/ip-rate-limit";
 import { prisma } from "../../shared/prisma";
 import { ConfigService } from "../config/service";
 import { EmailService } from "../email/service";
@@ -11,6 +13,18 @@ import { LoginInput } from "./dto";
 import { TrustedDeviceService } from "./trusted-device.service";
 
 const PRE_2FA_TOKEN_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+// Generic "Invalid credentials" message — used for every login failure
+// (no user, wrong password, inactive, external auth only) so the response
+// can't be used to enumerate accounts.
+const INVALID_CREDENTIALS = "Invalid credentials";
+
+// Pre-computed bcrypt hash used to equalize timing when the user lookup fails.
+// Plaintext "no-op" — the value never matches a real password.
+const DUMMY_BCRYPT_HASH = "$2a$12$CwTycUXWue0Thq9StjUM0uJ8/HsBNgz5zS5o.JqTwFqgUbcCBL3Hu";
+
+const IP_LOGIN_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
+const IP_LOGIN_MAX_FAILURES = 20; // per IP per window
 
 async function getJwtSecret(configService: ConfigService): Promise<string> {
   // Reuse the same JWT secret (env or db-persisted)
@@ -52,18 +66,30 @@ export class AuthService {
   private trustedDeviceService = new TrustedDeviceService();
 
   async login(data: LoginInput, userAgent?: string, ipAddress?: string) {
+    // Per-IP throttle (in addition to per-user). The per-user counter doesn't
+    // protect us when an attacker rotates usernames; the per-IP counter does.
+    if (ipAddress) {
+      const ipCheck = checkBlocked(`login:${ipAddress}`, IP_LOGIN_MAX_FAILURES);
+      if (ipCheck.blocked) {
+        throw new Error(
+          `Too many failed attempts. Please try again in ${Math.ceil(ipCheck.retryAfterSeconds / 60)} minutes.`
+        );
+      }
+    }
+
     const passwordAuthEnabled = await this.configService.getValue("passwordAuthEnabled");
     if (passwordAuthEnabled === "false") {
       throw new Error("Password authentication is disabled. Please use an external authentication provider.");
     }
 
     const user = await this.userRepository.findUserByEmailOrUsername(data.emailOrUsername);
-    if (!user) {
-      throw new Error("Invalid credentials");
-    }
 
-    if (!user.isActive) {
-      throw new Error("Account is inactive. Please contact an administrator.");
+    // Equalize timing for "user not found" vs "wrong password": run a bcrypt
+    // compare against a dummy hash so an attacker can't time-distinguish them.
+    if (!user || !user.isActive || !user.password) {
+      await bcrypt.compare(data.password, DUMMY_BCRYPT_HASH);
+      if (ipAddress) recordFailure(`login:${ipAddress}`, IP_LOGIN_WINDOW_MS, IP_LOGIN_MAX_FAILURES);
+      throw new Error(INVALID_CREDENTIALS);
     }
 
     const maxAttempts = Number(await this.configService.getValue("maxLoginAttempts"));
@@ -89,13 +115,12 @@ export class AuthService {
       }
     }
 
-    if (!user.password) {
-      throw new Error("This account uses external authentication. Please use the appropriate login method.");
-    }
-
     const isValid = await bcrypt.compare(data.password, user.password);
 
     if (!isValid) {
+      // Atomic counter — upsert is the right primitive here because
+      // Prisma serializes it under the unique-key constraint, so concurrent
+      // failed attempts cannot all read attempts=N and only bump it once.
       await prisma.loginAttempt.upsert({
         where: { userId: user.id },
         create: {
@@ -104,14 +129,13 @@ export class AuthService {
           lastAttempt: new Date(),
         },
         update: {
-          attempts: {
-            increment: 1,
-          },
+          attempts: { increment: 1 },
           lastAttempt: new Date(),
         },
       });
 
-      throw new Error("Invalid credentials");
+      if (ipAddress) recordFailure(`login:${ipAddress}`, IP_LOGIN_WINDOW_MS, IP_LOGIN_MAX_FAILURES);
+      throw new Error(INVALID_CREDENTIALS);
     }
 
     if (loginAttempt) {
@@ -119,6 +143,8 @@ export class AuthService {
         where: { userId: user.id },
       });
     }
+    // Successful login also clears the per-IP failure window.
+    if (ipAddress) clearKey(`login:${ipAddress}`);
 
     const has2FA = await this.twoFactorService.isEnabled(user.id);
 
@@ -270,7 +296,7 @@ export class AuthService {
       throw new Error("Invalid or expired reset token");
     }
 
-    const hashedPassword = await bcrypt.hash(newPassword, 10);
+    const hashedPassword = await bcrypt.hash(newPassword, BCRYPT_COST);
 
     await prisma.$transaction([
       prisma.user.update({

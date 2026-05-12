@@ -7,8 +7,6 @@ export const CreateInviteTokenResponseSchema = z.object({
 
 export const ValidateInviteTokenResponseSchema = z.object({
   valid: z.boolean().describe("Whether the token is valid"),
-  used: z.boolean().optional().describe("Whether the token has been used"),
-  expired: z.boolean().optional().describe("Whether the token has expired"),
 });
 
 export const RegisterWithInviteSchema = z.object({

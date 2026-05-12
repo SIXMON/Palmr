@@ -26,7 +26,10 @@ export class InviteController {
       const { token } = request.params;
       const validation = await this.inviteService.validateInviteToken(token);
 
-      return reply.send(validation);
+      // Do not leak `used` / `expired` — an attacker probing tokens shouldn't
+      // be able to distinguish "this token existed but is used" from
+      // "this token never existed". Return only `valid: boolean`.
+      return reply.send({ valid: validation.valid });
     } catch (error) {
       console.error("Error validating invite token:", error);
       return reply.status(500).send({ error: "Failed to validate invite token" });

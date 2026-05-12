@@ -192,13 +192,14 @@ export class ReverseShareController {
       const { id } = request.params as { id: string };
       const { password } = request.query as { password?: string };
       // CRITICAL: server generates objectName; client only supplies filename/extension.
-      const { filename, extension } = request.body as { filename: string; extension: string };
+      // size is optional but used to enforce maxFileSize before we hand out an upload URL.
+      const { filename, extension, size } = request.body as { filename: string; extension: string; size?: number };
 
       if (!filename || !extension) {
         return reply.status(400).send({ error: "filename and extension are required" });
       }
 
-      const result = await this.reverseShareService.getPresignedUrl(id, filename, extension, password);
+      const result = await this.reverseShareService.getPresignedUrl(id, filename, extension, size, password);
       return reply.send(result);
     } catch (error: any) {
       console.error("Get Presigned URL Error:", error);
@@ -222,13 +223,13 @@ export class ReverseShareController {
     try {
       const { alias } = request.params as { alias: string };
       const { password } = request.query as { password?: string };
-      const { filename, extension } = request.body as { filename: string; extension: string };
+      const { filename, extension, size } = request.body as { filename: string; extension: string; size?: number };
 
       if (!filename || !extension) {
         return reply.status(400).send({ error: "filename and extension are required" });
       }
 
-      const result = await this.reverseShareService.getPresignedUrlByAlias(alias, filename, extension, password);
+      const result = await this.reverseShareService.getPresignedUrlByAlias(alias, filename, extension, size, password);
       return reply.send(result);
     } catch (error: any) {
       console.error("Get Presigned URL by Alias Error:", error);

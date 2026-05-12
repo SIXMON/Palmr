@@ -14,7 +14,6 @@ const SetupSchema = z
 
 const VerifySetupSchema = z.object({
   token: z.string().min(6, "Token must be at least 6 characters"),
-  secret: z.string().min(1, "Secret is required"),
 });
 
 const VerifyTokenSchema = z.object({
@@ -22,6 +21,10 @@ const VerifyTokenSchema = z.object({
 });
 
 const DisableSchema = z.object({
+  password: z.string().min(1, "Password is required"),
+});
+
+const GenerateBackupCodesSchema = z.object({
   password: z.string().min(1, "Password is required"),
 });
 
@@ -72,7 +75,7 @@ export class TwoFactorController {
 
       const body = VerifySetupSchema.parse(request.body);
 
-      const result = await this.twoFactorService.verifySetup(userId, body.token, body.secret);
+      const result = await this.twoFactorService.verifySetup(userId, body.token);
 
       return reply.send(result);
     } catch (error: any) {
@@ -122,7 +125,7 @@ export class TwoFactorController {
   }
 
   /**
-   * Generate new backup codes
+   * Generate new backup codes (requires password reauth)
    */
   async generateBackupCodes(request: FastifyRequest, reply: FastifyReply) {
     try {
@@ -131,7 +134,8 @@ export class TwoFactorController {
         return reply.status(401).send({ error: "Unauthorized" });
       }
 
-      const codes = await this.twoFactorService.generateNewBackupCodes(userId);
+      const body = GenerateBackupCodesSchema.parse(request.body);
+      const codes = await this.twoFactorService.generateNewBackupCodes(userId, body.password);
 
       return reply.send({ backupCodes: codes });
     } catch (error: any) {

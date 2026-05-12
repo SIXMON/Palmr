@@ -1,5 +1,5 @@
 import * as fs from "fs";
-import process from "node:process";
+import { Agent as HttpsAgent } from "node:https";
 import { S3Client } from "@aws-sdk/client-s3";
 
 import { env } from "../env";
@@ -62,13 +62,14 @@ export const storageConfig: StorageConfig = (internalStorageConfig as StorageCon
   forcePathStyle: env.S3_FORCE_PATH_STYLE === "true",
 };
 
-if (storageConfig.useSSL && env.S3_REJECT_UNAUTHORIZED === "false") {
-  const originalRejectUnauthorized = process.env.NODE_TLS_REJECT_UNAUTHORIZED;
-  if (!originalRejectUnauthorized) {
-    process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
-    (global as any).PALMR_ORIGINAL_TLS_SETTING = originalRejectUnauthorized;
-  }
-}
+/**
+ * Scope `S3_REJECT_UNAUTHORIZED=false` to the S3 client only, via a
+ * dedicated httpsAgent. Setting NODE_TLS_REJECT_UNAUTHORIZED=0 globally
+ * (the previous behaviour) disabled TLS verification for SMTP, OIDC,
+ * webhooks — everything else this server might call.
+ */
+const allowSelfSignedS3 = storageConfig.useSSL && env.S3_REJECT_UNAUTHORIZED === "false";
+const s3HttpsAgent = allowSelfSignedS3 ? new HttpsAgent({ rejectUnauthorized: false }) : undefined;
 
 /**
  * Storage is ALWAYS S3-compatible:
@@ -77,22 +78,23 @@ if (storageConfig.useSSL && env.S3_REJECT_UNAUTHORIZED === "false") {
  */
 const hasValidConfig = storageConfig.endpoint && storageConfig.accessKey && storageConfig.secretKey;
 
-export const s3Client = hasValidConfig
-  ? new S3Client({
-      endpoint: storageConfig.useSSL
-        ? `https://${storageConfig.endpoint}${storageConfig.port ? `:${storageConfig.port}` : ""}`
-        : `http://${storageConfig.endpoint}${storageConfig.port ? `:${storageConfig.port}` : ""}`,
-      region: storageConfig.region,
-      credentials: {
-        accessKeyId: storageConfig.accessKey,
-        secretAccessKey: storageConfig.secretKey,
-      },
-      forcePathStyle: storageConfig.forcePathStyle,
-      requestHandler: {
-        requestTimeout: 300000, // 5 minutes timeout for S3 operations
-      },
-    })
-  : null;
+const s3ClientConfig: any = {
+  endpoint: storageConfig.useSSL
+    ? `https://${storageConfig.endpoint}${storageConfig.port ? `:${storageConfig.port}` : ""}`
+    : `http://${storageConfig.endpoint}${storageConfig.port ? `:${storageConfig.port}` : ""}`,
+  region: storageConfig.region,
+  credentials: {
+    accessKeyId: storageConfig.accessKey,
+    secretAccessKey: storageConfig.secretKey,
+  },
+  forcePathStyle: storageConfig.forcePathStyle,
+  requestHandler: {
+    requestTimeout: 300000, // 5 minutes timeout for S3 operations
+    ...(s3HttpsAgent ? { httpsAgent: s3HttpsAgent } : {}),
+  },
+};
+
+export const s3Client = hasValidConfig ? new S3Client(s3ClientConfig) : null;
 
 export const bucketName = storageConfig.bucketName;
 
@@ -134,7 +136,7 @@ export function createPublicS3Client(): S3Client | null {
       : `http://${storageConfig.endpoint}${storageConfig.port ? `:${storageConfig.port}` : ""}`;
   }
 
-  return new S3Client({
+  const publicConfig: any = {
     endpoint: publicEndpoint,
     region: storageConfig.region,
     credentials: {
@@ -144,6 +146,9 @@ export function createPublicS3Client(): S3Client | null {
     forcePathStyle: storageConfig.forcePathStyle,
     requestHandler: {
       requestTimeout: 300000, // 5 minutes timeout for S3 operations
+      ...(s3HttpsAgent ? { httpsAgent: s3HttpsAgent } : {}),
     },
-  });
+  };
+
+  return new S3Client(publicConfig);
 }

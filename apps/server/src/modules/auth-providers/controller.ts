@@ -1,5 +1,7 @@
 import { FastifyReply, FastifyRequest } from "fastify";
 
+import { authCookieOptions } from "../../shared/cookies";
+import { signSessionJwt } from "../../shared/jwt-sign";
 import { ConfigService } from "../config/service";
 import { UpdateAuthProviderSchema } from "./dto";
 import { AuthProvidersService } from "./service";
@@ -12,8 +14,6 @@ import {
   UpdateProviderRequest,
   UpdateProvidersOrderRequest,
 } from "./types";
-
-const COOKIE_MAX_AGE = 7 * 24 * 60 * 60 * 1000;
 
 const OFFICIAL_PROVIDER_ALLOWED_FIELDS = [
   "issuerUrl",
@@ -120,14 +120,8 @@ export class AuthProvidersController {
     return sanitizedData;
   }
 
-  private setAuthCookie(reply: FastifyReply, token: string, isSecure: boolean) {
-    reply.setCookie("token", token, {
-      httpOnly: true,
-      secure: isSecure,
-      sameSite: "lax",
-      maxAge: COOKIE_MAX_AGE,
-      path: "/",
-    });
+  private setAuthCookie(reply: FastifyReply, token: string) {
+    reply.setCookie("token", token, authCookieOptions);
   }
 
   private determineCallbackError(error: Error, provider: string): { type: string; message: string } {
@@ -375,12 +369,12 @@ export class AuthProvidersController {
 
       const result = await this.authProvidersService.handleCallback(providerName, code, state, requestContext);
 
-      const jwt = await request.jwtSign({
+      const jwt = await signSessionJwt(request, {
         userId: result.user.id,
         isAdmin: result.user.isAdmin,
       });
 
-      this.setAuthCookie(reply, jwt, request.protocol === "https");
+      this.setAuthCookie(reply, jwt);
 
       const redirectUrl = result.redirectUrl || "/dashboard";
       const fullRedirectUrl = redirectUrl.startsWith("http") ? redirectUrl : `${baseUrl}${redirectUrl}`;

@@ -1,6 +1,8 @@
 import bcrypt from "bcryptjs";
 
+import { BCRYPT_COST } from "../../shared/bcrypt-cost";
 import { prisma } from "../../shared/prisma";
+import { ConfigService } from "../config/service";
 import { EmailService } from "../email/service";
 import { FolderService } from "../folder/service";
 import { UserService } from "../user/service";
@@ -19,6 +21,7 @@ export class ShareService {
   private emailService = new EmailService();
   private userService = new UserService();
   private folderService = new FolderService();
+  private configService = new ConfigService();
 
   private async formatShareResponse(share: any) {
     return {
@@ -102,7 +105,7 @@ export class ShareService {
 
     const security = await prisma.shareSecurity.create({
       data: {
-        password: password ? await bcrypt.hash(password, 10) : null,
+        password: password ? await bcrypt.hash(password, BCRYPT_COST) : null,
         maxViews: maxViews,
       },
     });
@@ -169,7 +172,7 @@ export class ShareService {
 
     if (password || maxViews !== undefined) {
       await this.shareRepository.updateShareSecurity(share.securityId, {
-        password: password ? await bcrypt.hash(password, 10) : undefined,
+        password: password ? await bcrypt.hash(password, BCRYPT_COST) : undefined,
         maxViews: maxViews,
       });
     }
@@ -249,7 +252,7 @@ export class ShareService {
     }
 
     await this.shareRepository.updateShareSecurity(share.security.id, {
-      password: password ? await bcrypt.hash(password, 10) : null,
+      password: password ? await bcrypt.hash(password, BCRYPT_COST) : null,
     });
 
     const updated = await this.shareRepository.findShareById(shareId);
@@ -455,6 +458,30 @@ export class ShareService {
 
     if (!share.recipients || share.recipients.length === 0) {
       throw new Error("No recipients found for this share");
+    }
+
+    // CRITICAL: the shareLink ends up in an email that's branded with the
+    // server's appName. Without origin validation a user could send phishing
+    // links under our branding (open-redirect-style abuse). The link must
+    // point at the server's configured frontend URL.
+    const serverUrl = await this.configService.getValue("serverUrl");
+    if (serverUrl) {
+      try {
+        const link = new URL(shareLink);
+        const base = new URL(serverUrl);
+        if (link.origin !== base.origin) {
+          throw new Error("Share link must point to this server");
+        }
+      } catch {
+        throw new Error("Share link must be a valid URL pointing to this server");
+      }
+    }
+
+    // Cap the number of notifications sent in a single request so this
+    // endpoint can't be used as an SMTP relay for spam.
+    const RECIPIENT_CAP = 50;
+    if (share.recipients.length > RECIPIENT_CAP) {
+      throw new Error(`Cannot notify more than ${RECIPIENT_CAP} recipients at once`);
     }
 
     let senderName = "Someone";

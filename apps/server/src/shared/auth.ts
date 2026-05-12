@@ -1,5 +1,6 @@
 import { FastifyReply, FastifyRequest } from "fastify";
 
+import { isJtiRevoked } from "./jwt-revocation";
 import { prisma } from "./prisma";
 
 // NOTE: signatures use `any` (rather than typed FastifyRequest/FastifyReply)
@@ -17,6 +18,11 @@ export async function requireAuth(request: any, reply: any) {
     await request.jwtVerify();
   } catch {
     return reply.status(401).send({ error: "Unauthorized: a valid token is required to access this resource." });
+  }
+  // Reject revoked JWTs (e.g. after explicit logout) even though they are
+  // still cryptographically valid until exp.
+  if (isJtiRevoked(request.user?.jti)) {
+    return reply.status(401).send({ error: "Session expired. Please log in again." });
   }
 }
 
@@ -39,6 +45,9 @@ export async function requireAdmin(request: any, reply: any) {
       return reply.status(401).send({ error: "Unauthorized: a valid token is required to access this resource." });
     }
 
+    if (isJtiRevoked(request.user?.jti)) {
+      return reply.status(401).send({ error: "Session expired. Please log in again." });
+    }
     if (!request.user?.isAdmin) {
       return reply.status(403).send({ error: "Access restricted to administrators" });
     }
@@ -54,7 +63,9 @@ export async function requireAdmin(request: any, reply: any) {
 export async function tryGetUserId(request: FastifyRequest): Promise<string | null> {
   try {
     await request.jwtVerify();
-    return (request as any).user?.userId ?? null;
+    const user = (request as any).user;
+    if (isJtiRevoked(user?.jti)) return null;
+    return user?.userId ?? null;
   } catch {
     return null;
   }

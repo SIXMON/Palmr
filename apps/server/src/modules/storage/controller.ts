@@ -25,17 +25,18 @@ export class StorageController {
     } catch (error: any) {
       console.error("Controller error in getDiskSpace:", error);
 
+      // Never leak error.message to the client — it may contain absolute
+      // paths, mount info, or stack fragments. Use opaque, code-tagged
+      // responses instead.
       if (error.message?.includes("Unable to determine actual disk space")) {
         return reply.status(503).send({
-          error: "Disk space detection unavailable - system configuration issue",
-          details: "Please check system permissions and available disk utilities",
+          error: "Disk space detection unavailable",
           code: "DISK_SPACE_DETECTION_FAILED",
         });
       }
 
       return reply.status(500).send({
         error: "Failed to retrieve disk space information",
-        details: error.message || "Unknown error occurred",
       });
     }
   }
@@ -60,10 +61,16 @@ export class StorageController {
         });
       }
 
-      const result = await this.storageService.checkUploadAllowed(Number(fileSize), userId);
+      const sizeNumber = Number(fileSize);
+      if (!Number.isFinite(sizeNumber) || sizeNumber < 0) {
+        return reply.status(400).send({ error: "Invalid fileSize parameter" });
+      }
+
+      const result = await this.storageService.checkUploadAllowed(sizeNumber, userId);
       return reply.send(result);
     } catch (error: any) {
-      return reply.status(500).send({ error: error.message });
+      console.error("Controller error in checkUploadAllowed:", error);
+      return reply.status(500).send({ error: "Failed to check upload eligibility" });
     }
   }
 }

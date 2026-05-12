@@ -23,17 +23,8 @@ export async function twoFactorRoutes(app: FastifyInstance) {
         }),
         response: {
           200: z.object({
-            secret: z.string().describe("Base32 encoded secret"),
             qrCode: z.string().describe("QR code as data URL"),
-            manualEntryKey: z.string().describe("Manual entry key"),
-            backupCodes: z
-              .array(
-                z.object({
-                  code: z.string().describe("Backup code"),
-                  used: z.boolean().describe("Whether backup code is used"),
-                })
-              )
-              .describe("Backup codes"),
+            manualEntryKey: z.string().describe("Manual entry key for authenticators that can't scan the QR code"),
           }),
           400: z.object({ error: z.string().describe("Error message") }),
           401: z.object({ error: z.string().describe("Error message") }),
@@ -51,10 +42,9 @@ export async function twoFactorRoutes(app: FastifyInstance) {
         tags: ["Two-Factor Authentication"],
         operationId: "verify2FASetup",
         summary: "Verify 2FA Setup",
-        description: "Verify the setup token and enable 2FA",
+        description: "Verify the setup token and enable 2FA. The pending secret lives on the server.",
         body: z.object({
           token: z.string().min(6).describe("TOTP token"),
-          secret: z.string().min(1).describe("Base32 encoded secret"),
         }),
         response: {
           200: z.object({
@@ -126,7 +116,10 @@ export async function twoFactorRoutes(app: FastifyInstance) {
         tags: ["Two-Factor Authentication"],
         operationId: "generateBackupCodes",
         summary: "Generate Backup Codes",
-        description: "Generate new backup codes for 2FA",
+        description: "Generate new backup codes for 2FA. Requires re-entering the user's password.",
+        body: z.object({
+          password: z.string().min(1).describe("User password for confirmation"),
+        }),
         response: {
           200: z.object({
             backupCodes: z.array(z.string()).describe("New backup codes"),

@@ -506,9 +506,12 @@ export class FileController {
         return reply.status(403).send({ error: "Access denied." });
       }
 
-      // If renaming the file, check for duplicates and auto-rename if necessary
+      // If renaming the file, check for duplicates and auto-rename if necessary.
+      // Force the original extension to be preserved so a user can't disguise
+      // an .exe as a .pdf (which would surprise the recipient of a share).
       if (updateData.name && updateData.name !== fileRecord.name) {
-        const { baseName, extension } = parseFileName(updateData.name);
+        const { baseName } = parseFileName(updateData.name);
+        const extension = fileRecord.extension;
         const uniqueName = await generateUniqueFileNameForRename(baseName, extension, userId, fileRecord.folderId, id);
         updateData.name = uniqueName;
       }

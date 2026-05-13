@@ -572,8 +572,20 @@ type MultipartCompleteInput struct {
 }
 
 func (h *Handler) MultipartComplete(ctx context.Context, in *MultipartCompleteInput) (*FileMsgOutput, error) {
+	uc, err := auth.EnsureAuth(ctx)
+	if err != nil {
+		return nil, apperr.Unauthorized(err.Error())
+	}
 	if h.S3 == nil {
 		return nil, apperr.Internal("S3 not configured")
+	}
+	// SECURITY: the caller can hand us any `objectName` string. We
+	// must validate it sits under the caller's owned prefix; the
+	// matching MultipartCreate handler also generates keys with this
+	// shape. Without this check, anyone with a leaked uploadId could
+	// finalise it against a different user's prefix.
+	if !ownsObject(uc.UserID, in.Body.ObjectName) {
+		return nil, apperr.Forbidden("objectName not owned by caller")
 	}
 	completed := make([]s3types.CompletedPart, len(in.Body.Parts))
 	for i, p := range in.Body.Parts {
@@ -581,7 +593,7 @@ func (h *Handler) MultipartComplete(ctx context.Context, in *MultipartCompleteIn
 		num := p.num()
 		completed[i] = s3types.CompletedPart{ETag: &etag, PartNumber: &num}
 	}
-	_, err := h.S3.Client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+	_, err = h.S3.Client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
 		Bucket:          aws.String(h.S3.Bucket),
 		Key:             aws.String(in.Body.ObjectName),
 		UploadId:        aws.String(in.Body.UploadID),
@@ -603,10 +615,17 @@ type MultipartAbortInput struct {
 }
 
 func (h *Handler) MultipartAbort(ctx context.Context, in *MultipartAbortInput) (*FileMsgOutput, error) {
+	uc, err := auth.EnsureAuth(ctx)
+	if err != nil {
+		return nil, apperr.Unauthorized(err.Error())
+	}
 	if h.S3 == nil {
 		return nil, apperr.Internal("S3 not configured")
 	}
-	_, err := h.S3.Client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
+	if !ownsObject(uc.UserID, in.Body.ObjectName) {
+		return nil, apperr.Forbidden("objectName not owned by caller")
+	}
+	_, err = h.S3.Client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
 		Bucket:   aws.String(h.S3.Bucket),
 		Key:      aws.String(in.Body.ObjectName),
 		UploadId: aws.String(in.Body.UploadID),
@@ -617,6 +636,14 @@ func (h *Handler) MultipartAbort(ctx context.Context, in *MultipartAbortInput) (
 	out := &FileMsgOutput{}
 	out.Body.Message = "aborted"
 	return out, nil
+}
+
+// ownsObject returns true when `objectName` lives under the caller's
+// prefix. Object names produced by PresignPut/MultipartCreate start
+// with `<userId>/`; we enforce the same pattern on user-supplied
+// values to block cross-user multipart hijack.
+func ownsObject(userID, objectName string) bool {
+	return userID != "" && strings.HasPrefix(objectName, userID+"/")
 }
 
 // -----------------------------------------------------------------------------

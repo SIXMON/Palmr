@@ -58,7 +58,6 @@ export interface LoginBody {
 
 export interface RequestPasswordResetBody {
   email: string;
-  origin: string;
 }
 
 export interface ResetPasswordBody {

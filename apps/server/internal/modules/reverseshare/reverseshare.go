@@ -764,6 +764,9 @@ func (h *Handler) RegisterFileByAlias(ctx context.Context, in *RegisterFileAlias
 	if err := h.validateUpload(ctx, rs, in.Password, in.Body.Extension, &in.Body.Size); err != nil {
 		return nil, err
 	}
+	if !belongsToReverseShare(id, in.Body.ObjectName) {
+		return nil, apperr.Forbidden("objectName does not belong to this reverse share")
+	}
 	return h.insertFile(ctx, id, in.Body.Name, in.Body.Description, in.Body.Extension, in.Body.Size,
 		in.Body.ObjectName, in.Body.UploaderEmail, in.Body.UploaderName)
 }
@@ -776,8 +779,24 @@ func (h *Handler) RegisterFileByID(ctx context.Context, in *RegisterFileIDInput)
 	if err := h.validateUpload(ctx, rs, in.Password, in.Body.Extension, &in.Body.Size); err != nil {
 		return nil, err
 	}
+	if !belongsToReverseShare(in.ID, in.Body.ObjectName) {
+		return nil, apperr.Forbidden("objectName does not belong to this reverse share")
+	}
 	return h.insertFile(ctx, in.ID, in.Body.Name, in.Body.Description, in.Body.Extension, in.Body.Size,
 		in.Body.ObjectName, in.Body.UploaderEmail, in.Body.UploaderName)
+}
+
+// belongsToReverseShare returns true when the supplied S3 object name
+// sits under `reverse-shares/<id>/`. PresignPut / MultipartCreate mint
+// keys with exactly that prefix; we enforce it on every anonymous
+// callback that takes an `objectName` so an attacker can't register a
+// file row against — or finalise a multipart upload against — an
+// arbitrary key elsewhere in the bucket.
+func belongsToReverseShare(reverseShareID, objectName string) bool {
+	if reverseShareID == "" {
+		return false
+	}
+	return strings.HasPrefix(objectName, "reverse-shares/"+reverseShareID+"/")
 }
 
 func (h *Handler) insertFile(ctx context.Context, reverseShareID, name string, desc *string, ext string, size int64, obj string, email, uploader *string) (*RSFileOutput, error) {
@@ -969,13 +988,24 @@ func (h *Handler) MultipartComplete(ctx context.Context, in *MpCompleteInput) (*
 	if h.S3 == nil {
 		return nil, apperr.Internal("S3 not configured")
 	}
+	// Resolve the alias and confirm the supplied objectName belongs to
+	// it. The alias also gates whether the reverse share accepts
+	// uploads at all (matching what MultipartCreate does on the same
+	// route).
+	id, err := h.aliasToID(ctx, in.Alias)
+	if err != nil {
+		return nil, err
+	}
+	if !belongsToReverseShare(id, in.Body.ObjectName) {
+		return nil, apperr.Forbidden("objectName does not belong to this reverse share")
+	}
 	parts := make([]s3types.CompletedPart, len(in.Body.Parts))
 	for i, p := range in.Body.Parts {
 		etag := p.etag()
 		num := p.num()
 		parts[i] = s3types.CompletedPart{ETag: &etag, PartNumber: &num}
 	}
-	_, err := h.S3.Client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+	_, err = h.S3.Client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
 		Bucket:          aws.String(h.S3.Bucket),
 		Key:             aws.String(in.Body.ObjectName),
 		UploadId:        aws.String(in.Body.UploadID),
@@ -1002,7 +1032,14 @@ func (h *Handler) MultipartAbort(ctx context.Context, in *MpAbortInput) (*RSMsgO
 	if h.S3 == nil {
 		return nil, apperr.Internal("S3 not configured")
 	}
-	_, err := h.S3.Client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
+	id, err := h.aliasToID(ctx, in.Alias)
+	if err != nil {
+		return nil, err
+	}
+	if !belongsToReverseShare(id, in.Body.ObjectName) {
+		return nil, apperr.Forbidden("objectName does not belong to this reverse share")
+	}
+	_, err = h.S3.Client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
 		Bucket:   aws.String(h.S3.Bucket),
 		Key:      aws.String(in.Body.ObjectName),
 		UploadId: aws.String(in.Body.UploadID),

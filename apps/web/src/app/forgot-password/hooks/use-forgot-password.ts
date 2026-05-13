@@ -52,10 +52,11 @@ export function useForgotPassword() {
     }
 
     try {
-      await requestPasswordReset({
-        email: data.email,
-        origin: window.location.origin,
-      });
+      // `origin` used to be in this payload — the backend now derives
+      // the reset-link host from its own forwarded headers (any value
+      // we sent here was ignored at best, and historically used to
+      // enable a host-injection attack).
+      await requestPasswordReset({ email: data.email });
       toast.success(t("forgotPassword.resetInstructions"));
       router.push("/login");
     } catch (err) {

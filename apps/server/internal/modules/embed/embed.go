@@ -1,12 +1,26 @@
 // Package embed exposes /embed/:id — used by the frontend to embed images
 // (e.g. share previews) without a presigned URL roundtrip. The handler
-// streams the bytes from S3 with the right Content-Type.
+// streams the bytes from S3 with a safe Content-Type.
+//
+// SECURITY: this route is anonymous (anyone with a file ID can fetch).
+// SVG, HTML, and similar content types execute scripts when rendered
+// inline by the browser. To avoid same-origin XSS we:
+//
+//   * Pin the Content-Type to a safe inline-able image set when the
+//     stored extension matches a known-safe image. SVG is explicitly
+//     NOT included here — it's served as octet-stream + attachment
+//     disposition so the browser downloads rather than renders it.
+//   * Set `X-Content-Type-Options: nosniff` so a stored Content-Type
+//     of `text/html` (uploaded by a malicious user pretending it's a
+//     PNG) can't be sniffed and rendered.
+//   * Reflect the request context (`r.Context()`) into the S3 call so
+//     a disconnecting client cancels the upstream pull.
 package embed
 
 import (
-	"context"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -28,11 +42,22 @@ func (h *Handler) RegisterPlain(r chi.Router) {
 	r.Get("/embed/{id}", h.serve)
 }
 
+// safeInlineMime maps the stored file extension to a Content-Type the
+// browser is *safe* to render inline. Anything not in this set is
+// served as octet-stream + an attachment disposition.
+var safeInlineMime = map[string]string{
+	"png":  "image/png",
+	"jpg":  "image/jpeg",
+	"jpeg": "image/jpeg",
+	"gif":  "image/gif",
+	"webp": "image/webp",
+}
+
 func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	var obj, ext string
+	var obj, name, ext string
 	if err := h.DB.QueryRowContext(r.Context(),
-		`SELECT objectName, extension FROM files WHERE id = ?`, id).Scan(&obj, &ext); err != nil {
+		`SELECT objectName, name, extension FROM files WHERE id = ?`, id).Scan(&obj, &name, &ext); err != nil {
 		http.NotFound(w, r)
 		return
 	}
@@ -40,7 +65,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 		apperr.WriteJSON(w, http.StatusInternalServerError, "S3 not configured")
 		return
 	}
-	out, err := h.S3.Client.GetObject(context.Background(), &s3.GetObjectInput{
+	out, err := h.S3.Client.GetObject(r.Context(), &s3.GetObjectInput{
 		Bucket: aws.String(h.S3.Bucket),
 		Key:    aws.String(obj),
 	})
@@ -49,30 +74,34 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer out.Body.Close()
-	if ct := out.ContentType; ct != nil && *ct != "" {
-		w.Header().Set("Content-Type", *ct)
-	} else {
-		w.Header().Set("Content-Type", mimeForExt(ext))
+
+	ct, inline := safeInlineMime[strings.ToLower(ext)]
+	if !inline {
+		// Anything outside the safe-inline set (SVG, HTML, JS, PDF, …)
+		// goes as a download. SVG in particular contains executable
+		// script tags and same-origin renders → XSS primitive for
+		// anyone who can guess a file ID.
+		ct = "application/octet-stream"
+		fname := name + "." + ext
+		// Quote the filename in case it carries spaces or unicode.
+		w.Header().Set("Content-Disposition", `attachment; filename="`+sanitizeFilename(fname)+`"`)
 	}
+	w.Header().Set("Content-Type", ct)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Cache-Control", "public, max-age=3600")
 	_, _ = io.Copy(w, out.Body)
 }
 
-func mimeForExt(ext string) string {
-	switch ext {
-	case "png":
-		return "image/png"
-	case "jpg", "jpeg":
-		return "image/jpeg"
-	case "gif":
-		return "image/gif"
-	case "webp":
-		return "image/webp"
-	case "svg":
-		return "image/svg+xml"
-	case "pdf":
-		return "application/pdf"
-	default:
-		return "application/octet-stream"
+// sanitizeFilename strips quote/control characters that would let an
+// attacker inject extra headers via a crafted filename in the DB.
+func sanitizeFilename(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r < 0x20 || r == '"' || r == '\\' {
+			b.WriteByte('_')
+			continue
+		}
+		b.WriteRune(r)
 	}
+	return b.String()
 }

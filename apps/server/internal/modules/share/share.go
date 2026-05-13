@@ -175,10 +175,16 @@ func (h *Handler) Create(ctx context.Context, in *ShareCreateInput) (*ShareCreat
 		return nil, apperr.Internal("create share: " + err.Error())
 	}
 
-	// Attach files (M2M table: _ShareFiles)
+	// Attach files (M2M table: _ShareFiles). SECURITY: the IDs come
+	// from the request body — without an ownership check the caller
+	// could attach someone else's file and then make it publicly
+	// downloadable via the share alias.
 	for _, fid := range in.Body.Files {
 		if fid == "" {
 			continue
+		}
+		if err := assertFileOwnedBy(ctx, tx, fid, uc.UserID); err != nil {
+			return nil, err
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO _ShareFiles (A, B) VALUES (?, ?)`, fid, id); err != nil {
 			return nil, apperr.Internal("attach file: " + err.Error())
@@ -187,6 +193,9 @@ func (h *Handler) Create(ctx context.Context, in *ShareCreateInput) (*ShareCreat
 	for _, fid := range in.Body.Folders {
 		if fid == "" {
 			continue
+		}
+		if err := assertFolderOwnedBy(ctx, tx, fid, uc.UserID); err != nil {
+			return nil, err
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO _ShareFolders (A, B) VALUES (?, ?)`, fid, id); err != nil {
 			return nil, apperr.Internal("attach folder: " + err.Error())
@@ -449,11 +458,26 @@ func (h *Handler) AddItems(ctx context.Context, in *ShareItemsInput) (*ShareGetO
 	if err := h.assertOwner(ctx, in.ShareID, uc.UserID); err != nil {
 		return nil, err
 	}
+	// SECURITY: verify each id is owned by the caller before joining
+	// it to the share. Without this, an owner of share A could attach
+	// user B's files to A and expose them via A's public alias.
 	for _, fid := range in.Body.Files {
-		dbtypes.LogBestEffort(ctx, "share.share.insert.or.ignore.into", h.DB, `INSERT OR IGNORE INTO _ShareFiles (A, B) VALUES (?, ?)`, fid, in.ShareID)
+		if fid == "" {
+			continue
+		}
+		if err := assertFileOwnedBy(ctx, h.DB, fid, uc.UserID); err != nil {
+			return nil, err
+		}
+		dbtypes.LogBestEffort(ctx, "share.attach_file", h.DB, `INSERT OR IGNORE INTO _ShareFiles (A, B) VALUES (?, ?)`, fid, in.ShareID)
 	}
 	for _, fid := range in.Body.Folders {
-		dbtypes.LogBestEffort(ctx, "share.share.insert.or.ignore.into", h.DB, `INSERT OR IGNORE INTO _ShareFolders (A, B) VALUES (?, ?)`, fid, in.ShareID)
+		if fid == "" {
+			continue
+		}
+		if err := assertFolderOwnedBy(ctx, h.DB, fid, uc.UserID); err != nil {
+			return nil, err
+		}
+		dbtypes.LogBestEffort(ctx, "share.attach_folder", h.DB, `INSERT OR IGNORE INTO _ShareFolders (A, B) VALUES (?, ?)`, fid, in.ShareID)
 	}
 	v, _ := h.fullView(ctx, in.ShareID)
 	out := &ShareGetOutput{}
@@ -797,6 +821,40 @@ func (h *Handler) assertOwner(ctx context.Context, shareID, userID string) error
 	}
 	if owner != userID {
 		return apperr.Forbidden("not your share")
+	}
+	return nil
+}
+
+// dbExecutor is the subset of sqlx.{DB,Tx} we use in the two ownership
+// helpers — lets the same code run inside a transaction during Create
+// and on the bare DB during AddItems.
+type dbExecutor interface {
+	GetContext(ctx context.Context, dest any, query string, args ...any) error
+}
+
+// assertFileOwnedBy returns a Forbidden error if the file row exists
+// but belongs to someone else; NotFound when no row matches the id.
+// Used at every spot where the caller supplies a file id from a
+// request body (share Create / AddItems).
+func assertFileOwnedBy(ctx context.Context, ex dbExecutor, fileID, userID string) error {
+	var owner string
+	if err := ex.GetContext(ctx, &owner, `SELECT userId FROM files WHERE id = ?`, fileID); err != nil {
+		return apperr.NotFound("file not found")
+	}
+	if owner != userID {
+		return apperr.Forbidden("file not owned by caller")
+	}
+	return nil
+}
+
+// assertFolderOwnedBy mirrors assertFileOwnedBy for folder ids.
+func assertFolderOwnedBy(ctx context.Context, ex dbExecutor, folderID, userID string) error {
+	var owner string
+	if err := ex.GetContext(ctx, &owner, `SELECT userId FROM folders WHERE id = ?`, folderID); err != nil {
+		return apperr.NotFound("folder not found")
+	}
+	if owner != userID {
+		return apperr.Forbidden("folder not owned by caller")
 	}
 	return nil
 }

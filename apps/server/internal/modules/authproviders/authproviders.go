@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -378,6 +379,9 @@ func (h *Handler) Create(ctx context.Context, in *APCreateInput) (*APSingleOutpu
 		return nil, apperr.Unauthorized(err.Error())
 	}
 	p := in.Body.toProvider()
+	if err := validateProviderEndpoints(p); err != nil {
+		return nil, err
+	}
 	p.ID = uuid.NewString()
 	now := time.Now().UTC()
 	p.CreatedAt = dbtypes.PrismaTime{Time: now}
@@ -417,6 +421,9 @@ func (h *Handler) Update(ctx context.Context, in *APUpdateInput) (*APSingleOutpu
 		return nil, apperr.NotFound("provider not found")
 	}
 	in.Body.applyTo(&p)
+	if err := validateProviderEndpoints(p); err != nil {
+		return nil, err
+	}
 	_, err := h.DB.ExecContext(ctx, `
 		UPDATE auth_providers SET name=?, displayName=?, type=?, icon=?, enabled=?, issuerUrl=?, clientId=?, clientSecret=?,
 		redirectUri=?, scope=?, authorizationEndpoint=?, tokenEndpoint=?, userInfoEndpoint=?, metadata=?,
@@ -569,8 +576,13 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 	// most common spot for opaque OAuth bugs) writes the request +
 	// response to the server log. Client secret is masked on the way
 	// out so the log stays grep-friendly without leaking the secret.
+	//
+	// SECURITY: the underlying transport is safeHTTPClient.Transport
+	// — same private-IP refusal as the rest of the OIDC outbound
+	// path. Don't replace with http.DefaultTransport.
 	ctx = context.WithValue(ctx, oauth2.HTTPClient, &http.Client{
-		Transport: &oidcDebugTransport{base: http.DefaultTransport, provider: name},
+		Timeout:   10 * time.Second,
+		Transport: &oidcDebugTransport{base: safeHTTPClient.Transport, provider: name},
 	})
 	tok, err := conf.Exchange(ctx, code, oauth2.SetAuthURLParam("code_verifier", st.CodeVerifier))
 	if err != nil {
@@ -580,18 +592,18 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 
 	// Pull userinfo. If the provider has an OIDC issuer we use go-oidc;
 	// otherwise we hit userInfoEndpoint directly.
-	email, sub, err := h.fetchIdentity(ctx, p, tok)
+	identity, err := h.fetchIdentity(ctx, p, tok)
 	if err != nil {
 		apperr.WriteJSON(w, http.StatusBadGateway, "userinfo: "+err.Error())
 		return
 	}
-	if email == "" || sub == "" {
+	if identity.Email == "" || identity.Subject == "" {
 		apperr.WriteJSON(w, http.StatusBadGateway, "missing claims")
 		return
 	}
 
 	// Link or create user.
-	userID, isAdmin, err := h.linkOrCreate(r.Context(), p, email, sub)
+	userID, isAdmin, err := h.linkOrCreate(r.Context(), p, identity)
 	if err != nil {
 		apperr.WriteJSON(w, http.StatusBadRequest, err.Error())
 		return
@@ -665,7 +677,14 @@ func (h *Handler) oauth2Config(ctx context.Context, p Provider) (*oauth2.Config,
 // and vice versa, so a plain literal compare false-rejects what is
 // the same logical issuer. Retrying with the slash toggled covers both
 // directions without dropping the issuer check entirely.
+//
+// SECURITY: go-oidc uses the http.Client stored in the context via
+// oidc.ClientContext for discovery, JWKS fetch, and UserInfo. We
+// inject safeHTTPClient here so all of those obey the same private-IP
+// refusal as fetchIdentityManual — without it, a compromised admin
+// could still pivot through discovery to internal services.
 func discoverOIDCProvider(ctx context.Context, issuer string) (*oidc.Provider, error) {
+	ctx = oidc.ClientContext(ctx, safeHTTPClient)
 	prov, firstErr := oidc.NewProvider(ctx, issuer)
 	if firstErr == nil {
 		return prov, nil
@@ -699,8 +718,35 @@ func resolveAgainstIssuer(issuer, endpoint string) string {
 	return issuer + endpoint
 }
 
-func (h *Handler) fetchIdentity(ctx context.Context, p Provider, tok *oauth2.Token) (email, sub string, err error) {
+// oidcIdentity is what fetchIdentity returns. `EmailVerified` is the
+// claim of the same name from id_token or /userinfo — when false (or
+// missing) we refuse to link the OIDC sub to an existing local user
+// by email, since an attacker could otherwise register an unverified
+// `admin@palmr.tld` at the IdP and inherit the local admin row.
+type oidcIdentity struct {
+	Email         string
+	Subject       string
+	EmailVerified bool
+}
+
+// oidcClaims are the fields we extract from id_token / userinfo. We
+// keep email_verified as a pointer so we can distinguish absent
+// (treat as not verified) from explicit false.
+type oidcClaims struct {
+	Email         string `json:"email"`
+	Subject       string `json:"sub"`
+	EmailVerified *bool  `json:"email_verified"`
+}
+
+func (h *Handler) fetchIdentity(ctx context.Context, p Provider, tok *oauth2.Token) (oidcIdentity, error) {
 	rawIssuer := deref(p.IssuerURL)
+
+	// Force every go-oidc outbound call (discovery, JWKS for token
+	// verification, /userinfo) through safeHTTPClient. Otherwise
+	// go-oidc reads the client off ctx via oidc.ClientContext, and
+	// without this wrap it falls back to http.DefaultClient which has
+	// no SSRF protection.
+	ctx = oidc.ClientContext(ctx, safeHTTPClient)
 
 	// Prefer OIDC discovery — id-token verification + userinfo come
 	// for free. Falls through to the manual /userinfo path if the IdP
@@ -712,23 +758,25 @@ func (h *Handler) fetchIdentity(ctx context.Context, p Provider, tok *oauth2.Tok
 			if ok && rawID != "" {
 				verifier := prov.Verifier(&oidc.Config{ClientID: deref(p.ClientID)})
 				if idTok, err := verifier.Verify(ctx, rawID); err == nil {
-					var c struct {
-						Email   string `json:"email"`
-						Subject string `json:"sub"`
-					}
+					var c oidcClaims
 					if err := idTok.Claims(&c); err == nil && c.Email != "" {
-						return strings.ToLower(c.Email), c.Subject, nil
+						return oidcIdentity{
+							Email:         strings.ToLower(c.Email),
+							Subject:       c.Subject,
+							EmailVerified: c.EmailVerified != nil && *c.EmailVerified,
+						}, nil
 					}
 				}
 			}
 			ui, err := prov.UserInfo(ctx, oauth2.StaticTokenSource(tok))
 			if err == nil {
-				var c struct {
-					Email   string `json:"email"`
-					Subject string `json:"sub"`
-				}
+				var c oidcClaims
 				if err := ui.Claims(&c); err == nil {
-					return strings.ToLower(c.Email), c.Subject, nil
+					return oidcIdentity{
+						Email:         strings.ToLower(c.Email),
+						Subject:       c.Subject,
+						EmailVerified: c.EmailVerified != nil && *c.EmailVerified,
+					}, nil
 				}
 			}
 		}
@@ -743,61 +791,82 @@ func (h *Handler) fetchIdentity(ctx context.Context, p Provider, tok *oauth2.Tok
 }
 
 // fetchIdentityManual hits the admin-configured userInfoEndpoint with
-// the access token and pulls the standard `email` and `sub` claims out
-// of the JSON response. Path-relative endpoints are resolved against
-// the issuer URL.
-func (h *Handler) fetchIdentityManual(ctx context.Context, p Provider, tok *oauth2.Token) (email, sub string, err error) {
+// the access token and pulls the standard `email`, `sub`, and
+// `email_verified` claims out of the JSON response. Path-relative
+// endpoints are resolved against the issuer URL.
+func (h *Handler) fetchIdentityManual(ctx context.Context, p Provider, tok *oauth2.Token) (oidcIdentity, error) {
 	issuer := strings.TrimRight(deref(p.IssuerURL), "/")
 	uiURL := resolveAgainstIssuer(issuer, deref(p.UserInfoEndpoint))
 	if uiURL == "" {
-		return "", "", apperr.BadRequest("provider has no userInfoEndpoint configured")
+		return oidcIdentity{}, apperr.BadRequest("provider has no userInfoEndpoint configured")
 	}
 	if !strings.HasPrefix(uiURL, "http://") && !strings.HasPrefix(uiURL, "https://") {
-		return "", "", apperr.BadRequest("userInfoEndpoint is relative but no issuerUrl is set to resolve it")
+		return oidcIdentity{}, apperr.BadRequest("userInfoEndpoint is relative but no issuerUrl is set to resolve it")
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, uiURL, nil)
 	if err != nil {
-		return "", "", err
+		return oidcIdentity{}, err
 	}
 	req.Header.Set("Authorization", "Bearer "+tok.AccessToken)
-	resp, err := http.DefaultClient.Do(req)
+	// safeHTTPClient refuses to dial private/loopback/link-local IPs and
+	// re-checks at connect time (DNS rebinding defence). See validate
+	// ProviderEndpoints + safeHTTPClient docstrings below.
+	resp, err := safeHTTPClient.Do(req)
 	if err != nil {
-		return "", "", err
+		return oidcIdentity{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return "", "", fmt.Errorf("userinfo %d: %s", resp.StatusCode, string(body))
+		// SECURITY: do NOT reflect the upstream body into our error.
+		// `IssuerURL`/`UserInfoEndpoint` are admin-configured, which
+		// means a careless or malicious admin can point them at an
+		// internal HTTP service; including the response body in the
+		// caller-visible error turns blind SSRF into an oracle.
+		return oidcIdentity{}, fmt.Errorf("userinfo upstream returned %d", resp.StatusCode)
 	}
-	var c struct {
-		Email   string `json:"email"`
-		Subject string `json:"sub"`
-	}
+	var c oidcClaims
 	if err := json.NewDecoder(resp.Body).Decode(&c); err != nil {
-		return "", "", err
+		return oidcIdentity{}, err
 	}
 	if c.Email == "" {
-		return "", "", fmt.Errorf("userinfo response missing email claim")
+		return oidcIdentity{}, fmt.Errorf("userinfo response missing email claim")
 	}
-	return strings.ToLower(c.Email), c.Subject, nil
+	return oidcIdentity{
+		Email:         strings.ToLower(c.Email),
+		Subject:       c.Subject,
+		EmailVerified: c.EmailVerified != nil && *c.EmailVerified,
+	}, nil
 }
 
-func (h *Handler) linkOrCreate(ctx context.Context, p Provider, email, sub string) (string, bool, error) {
-	// 1) Existing link?
+func (h *Handler) linkOrCreate(ctx context.Context, p Provider, id oidcIdentity) (string, bool, error) {
+	// 1) Existing link by (providerId, externalId)? The subject claim
+	//    is IdP-issued and immutable — safe to trust regardless of
+	//    email_verified.
 	var userID string
 	err := h.DB.GetContext(ctx, &userID,
-		`SELECT userId FROM user_auth_providers WHERE providerId = ? AND externalId = ?`, p.ID, sub)
+		`SELECT userId FROM user_auth_providers WHERE providerId = ? AND externalId = ?`, p.ID, id.Subject)
 	if err == nil {
 		var isAdmin bool
 		_ = h.DB.GetContext(ctx, &isAdmin, `SELECT isAdmin FROM users WHERE id = ?`, userID)
 		return userID, isAdmin, nil
 	}
 	// 2) User exists by email?
-	err = h.DB.GetContext(ctx, &userID, `SELECT id FROM users WHERE email = ?`, email)
+	//    SECURITY: refuse to link by email unless the IdP says the
+	//    email is verified. Otherwise any attacker who can register
+	//    `admin@palmr.tld` at the IdP (without proving control of the
+	//    mailbox — common on self-hosted IdPs, social logins without
+	//    verification, federated SAML→OIDC bridges) inherits the
+	//    existing local row, including its admin flag.
+	err = h.DB.GetContext(ctx, &userID, `SELECT id FROM users WHERE email = ?`, id.Email)
 	if err == nil {
+		if !id.EmailVerified {
+			return "", false, apperr.Forbidden(
+				"an account with this email already exists; the identity provider has not " +
+					"confirmed that you control this email, so it cannot be linked automatically")
+		}
 		dbtypes.LogBestEffort(ctx, "authproviders.link_existing_user", h.DB,
 			`INSERT INTO user_auth_providers (id, userId, providerId, externalId, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?)`,
-			uuid.NewString(), userID, p.ID, sub, time.Now(), time.Now())
+			uuid.NewString(), userID, p.ID, id.Subject, time.Now(), time.Now())
 		var isAdmin bool
 		_ = h.DB.GetContext(ctx, &isAdmin, `SELECT isAdmin FROM users WHERE id = ?`, userID)
 		return userID, isAdmin, nil
@@ -808,26 +877,30 @@ func (h *Handler) linkOrCreate(ctx context.Context, p Provider, email, sub strin
 	}
 	uid := uuid.NewString()
 	isAdmin := false
-	if p.AdminEmailDomains != nil {
+	// AdminEmailDomains lets the operator say "anyone with this email
+	// domain becomes admin". Only honour it when the email is
+	// verified — otherwise an IdP that lets users set arbitrary
+	// unverified emails would be an admin-escalation surface.
+	if id.EmailVerified && p.AdminEmailDomains != nil {
 		for _, d := range strings.Split(*p.AdminEmailDomains, ",") {
-			if strings.EqualFold(strings.TrimSpace(d), strings.SplitN(email, "@", 2)[1]) {
+			if strings.EqualFold(strings.TrimSpace(d), strings.SplitN(id.Email, "@", 2)[1]) {
 				isAdmin = true
 				break
 			}
 		}
 	}
-	username := strings.SplitN(email, "@", 2)[0]
+	username := strings.SplitN(id.Email, "@", 2)[0]
 	now := time.Now().UTC()
 	_, err = h.DB.ExecContext(ctx, `
 		INSERT INTO users (id, firstName, lastName, username, email, isAdmin, isActive, createdAt, updatedAt, twoFactorEnabled, twoFactorVerified)
 		VALUES (?, ?, '', ?, ?, ?, 1, ?, ?, 0, 0)`,
-		uid, username, username, email, isAdmin, now, now)
+		uid, username, username, id.Email, isAdmin, now, now)
 	if err != nil {
 		return "", false, apperr.Internal("auto-register: " + err.Error())
 	}
 	dbtypes.LogBestEffort(ctx, "authproviders.link_new_user", h.DB,
 		`INSERT INTO user_auth_providers (id, userId, providerId, externalId, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?)`,
-		uuid.NewString(), uid, p.ID, sub, now, now)
+		uuid.NewString(), uid, p.ID, id.Subject, now, now)
 	return uid, isAdmin, nil
 }
 
@@ -932,6 +1005,132 @@ func genState() string {
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+// -----------------------------------------------------------------------------
+// SSRF defence
+// -----------------------------------------------------------------------------
+
+// validateProviderEndpoints rejects admin-supplied provider URLs that
+// point at private / loopback / link-local / multicast / unspecified
+// address ranges. Required because the OIDC handshake makes the
+// backend issue outbound HTTP requests to IssuerURL +
+// AuthorizationEndpoint + TokenEndpoint + UserInfoEndpoint — without
+// validation, a careless or compromised admin could aim those at the
+// cloud-metadata service (169.254.169.254), the host's localhost
+// services, RFC1918 internal hosts, etc. We refuse non-http(s)
+// schemes too (file:, gopher:, ftp:).
+func validateProviderEndpoints(p Provider) error {
+	urls := []struct {
+		field string
+		value *string
+	}{
+		{"issuerUrl", p.IssuerURL},
+		{"authorizationEndpoint", p.AuthorizationEndpoint},
+		{"tokenEndpoint", p.TokenEndpoint},
+		{"userInfoEndpoint", p.UserInfoEndpoint},
+		{"redirectUri", p.RedirectURI},
+	}
+	for _, u := range urls {
+		if u.value == nil || *u.value == "" {
+			continue
+		}
+		raw := strings.TrimSpace(*u.value)
+		// Relative endpoint paths are resolved against IssuerURL at
+		// fetch time — they can't reach a different host on their own,
+		// so skip the host validation here.
+		if strings.HasPrefix(raw, "/") {
+			continue
+		}
+		parsed, err := url.Parse(raw)
+		if err != nil {
+			return apperr.BadRequest(u.field + " is not a valid URL")
+		}
+		if parsed.Scheme != "http" && parsed.Scheme != "https" {
+			return apperr.BadRequest(u.field + " must be http or https")
+		}
+		host := parsed.Hostname()
+		if host == "" {
+			return apperr.BadRequest(u.field + " has no host")
+		}
+		if isPrivateHost(host) {
+			return apperr.BadRequest(u.field + " points to a private/loopback address")
+		}
+	}
+	return nil
+}
+
+// isPrivateHost returns true when the literal IP — or every IP a name
+// resolves to — falls inside a range we refuse to call out to.
+// Hostnames that don't resolve are conservatively rejected; the admin
+// can fix the DNS or use the IP literal.
+func isPrivateHost(host string) bool {
+	// Strip an IPv6 bracketed form.
+	host = strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
+	if ip := net.ParseIP(host); ip != nil {
+		return isPrivateIP(ip)
+	}
+	// localhost-by-name covers the case where /etc/hosts maps it but
+	// we don't want to lean on a DNS round-trip in the validator.
+	if strings.EqualFold(host, "localhost") || strings.HasSuffix(strings.ToLower(host), ".localhost") {
+		return true
+	}
+	addrs, err := net.LookupIP(host)
+	if err != nil || len(addrs) == 0 {
+		return true // can't verify — refuse
+	}
+	for _, a := range addrs {
+		if isPrivateIP(a) {
+			return true
+		}
+	}
+	return false
+}
+
+func isPrivateIP(ip net.IP) bool {
+	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+		ip.IsMulticast() || ip.IsUnspecified() || ip.IsPrivate() {
+		return true
+	}
+	return false
+}
+
+// safeHTTPClient is the http.Client we use for OIDC outbound requests.
+// Its Transport is built on a Dialer that re-validates every resolved
+// address right before connecting — defence against DNS rebinding
+// where the hostname was healthy at config-write time but flips to
+// 127.0.0.1 on the actual request.
+var safeHTTPClient = &http.Client{
+	Timeout: 10 * time.Second,
+	Transport: &http.Transport{
+		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			host, port, err := net.SplitHostPort(address)
+			if err != nil {
+				return nil, err
+			}
+			ip := net.ParseIP(host)
+			if ip == nil {
+				addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+				if err != nil || len(addrs) == 0 {
+					return nil, fmt.Errorf("dns lookup failed for %s", host)
+				}
+				for _, a := range addrs {
+					if isPrivateIP(a.IP) {
+						return nil, fmt.Errorf("refusing to connect to private address %s", a.IP)
+					}
+				}
+				ip = addrs[0].IP
+			} else if isPrivateIP(ip) {
+				return nil, fmt.Errorf("refusing to connect to private address %s", ip)
+			}
+			var d net.Dialer
+			d.Timeout = 10 * time.Second
+			return d.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+		},
+		MaxIdleConns:        20,
+		IdleConnTimeout:     30 * time.Second,
+		TLSHandshakeTimeout: 10 * time.Second,
+	},
 }
 
 // -----------------------------------------------------------------------------

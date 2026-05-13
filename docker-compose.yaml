@@ -4,8 +4,8 @@
 #
 # Services
 #   traefik      — HTTP router that fans out /api → backend, / → frontend
-#   minio        — S3-compatible object store (image: minio/minio)
-#   minio-init   — one-shot job that creates the bucket on first boot
+#   rustfs       — S3-compatible object store (image: rustfs/rustfs)
+#   rustfs-init  — one-shot job that creates the bucket on first boot
 #   palmr-server — Go backend         (Dockerfile: apps/server/Dockerfile)
 #   palmr-web    — Next.js static export served by nginx (apps/web/Dockerfile)
 #
@@ -64,25 +64,50 @@ services:
       - palmr
 
   # ---------------------------------------------------------------------------
-  # Object storage (S3-compatible) — used by palmr-server via ENABLE_S3=true.
-  # The web client also reaches MinIO directly for presigned uploads/downloads
-  # via STORAGE_URL, so the API port is published on the host.
+  # Object storage (S3-compatible) — RustFS. Used by palmr-server through
+  # the AWS SDK and by browsers directly via STORAGE_URL for presigned
+  # upload/download. The S3 API port is published on the host because
+  # presigned URLs hand the browser an absolute URL to MinIO/RustFS.
+  #
+  # Why not MinIO: MinIO is AGPL-v3 (with a known "console clause" drift),
+  # while RustFS is Apache-2.0. The Rust binary also idles on ~40 MB RAM
+  # vs MinIO's ~150 MB on the same workload.
   # ---------------------------------------------------------------------------
-  minio:
-    image: minio/minio:latest
-    container_name: palmr-minio
+  rustfs:
+    image: rustfs/rustfs:1.0.0-beta.2
+    container_name: palmr-rustfs
     restart: unless-stopped
-    command: server /data --address ":9379" --console-address ":9378"
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER is required}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is required}
+      # Single-volume single-node mode — the multi-volume erasure-coded
+      # layout from the RustFS upstream compose is overkill for one
+      # Docker host. Bump to /data/rustfs{0..3} + 4 volumes if you ever
+      # want erasure coding here.
+      RUSTFS_VOLUMES: /data
+      RUSTFS_ADDRESS: 0.0.0.0:9000
+      RUSTFS_CONSOLE_ADDRESS: 0.0.0.0:9001
+      RUSTFS_CONSOLE_ENABLE: "true"
+      # Browsers POSTing to presigned URLs use the public hostname (e.g.
+      # storage.example.com), which is a different origin than the
+      # frontend — CORS must allow it. The S3 API CORS is system-level
+      # in RustFS (RUSTFS_CORS_ALLOWED_ORIGINS — bucket-level CORS via
+      # PutBucketCors is not yet enforced in beta.2: the call returns
+      # 200 but GetBucketCors then reports NoSuchCORSConfiguration).
+      # The layer that handles this *does* expose ETag in
+      # Access-Control-Expose-Headers, which is what Uppy and Palmr's
+      # multipart UI need to confirm parts.
+      # Lock this down to the real browser origins in production.
+      RUSTFS_CONSOLE_CORS_ALLOWED_ORIGINS: "*"
+      RUSTFS_CORS_ALLOWED_ORIGINS: "*"
+      RUSTFS_ACCESS_KEY: ${STORAGE_ACCESS_KEY:?STORAGE_ACCESS_KEY is required}
+      RUSTFS_SECRET_KEY: ${STORAGE_SECRET_KEY:?STORAGE_SECRET_KEY is required}
+      RUSTFS_OBS_LOGGER_LEVEL: info
     volumes:
-      - minio-data:/data
+      - rustfs-data:/data
     ports:
-      - "${MINIO_API_PORT:-9379}:9379"   # S3 API (must be reachable from browsers for presigned URLs)
-      - "${MINIO_CONSOLE_PORT:-9378}:9378" # Admin console — keep behind a firewall in prod
+      - "${STORAGE_API_PORT:-9379}:9000"     # S3 API (must reach browsers for presigned URLs)
+      - "${STORAGE_CONSOLE_PORT:-9378}:9001" # Admin console — keep behind a firewall in prod
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:9379/minio/health/live || exit 1"]
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:9000/health || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 10
@@ -91,34 +116,42 @@ services:
       - palmr
 
   # ---------------------------------------------------------------------------
-  # One-shot bootstrap: creates the bucket once MinIO is healthy. Idempotent —
-  # safe to leave in the compose file (it exits cleanly if the bucket exists).
+  # One-shot bootstrap: creates the bucket once RustFS is healthy. Uses the
+  # AWS CLI against the S3-compatible endpoint instead of `mc` (which is
+  # MinIO-specific and uses admin endpoints RustFS doesn't expose).
+  # Idempotent — `head-bucket` exits non-zero only when the bucket really
+  # doesn't exist.
+  #
+  # CORS is configured server-wide on the rustfs service itself via
+  # RUSTFS_CORS_ALLOWED_ORIGINS rather than per-bucket here. RustFS-beta.2
+  # accepts PutBucketCors with HTTP 200 but doesn't persist it (GetBucketCors
+  # then errors with NoSuchCORSConfiguration), so the env-var path is the
+  # only one that actually works today.
   # ---------------------------------------------------------------------------
-  minio-init:
-    image: minio/mc:latest
-    container_name: palmr-minio-init
+  rustfs-init:
+    image: amazon/aws-cli:latest
+    container_name: palmr-rustfs-init
     restart: "no"
     depends_on:
-      minio:
+      rustfs:
         condition: service_healthy
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
-      MINIO_BUCKET: ${MINIO_BUCKET:-palmr-files}
-    entrypoint: >
-      /bin/sh -c "
-      set -e;
-      echo '[minio-init] configuring mc alias…';
-      mc alias set palmr http://minio:9379 \"$$MINIO_ROOT_USER\" \"$$MINIO_ROOT_PASSWORD\";
-      if mc ls palmr/$$MINIO_BUCKET >/dev/null 2>&1; then
-        echo '[minio-init] bucket already exists, nothing to do';
-      else
-        echo '[minio-init] creating bucket' $$MINIO_BUCKET;
-        mc mb palmr/$$MINIO_BUCKET;
-        mc anonymous set none palmr/$$MINIO_BUCKET;
-      fi;
-      echo '[minio-init] done';
-      "
+      AWS_ACCESS_KEY_ID: ${STORAGE_ACCESS_KEY}
+      AWS_SECRET_ACCESS_KEY: ${STORAGE_SECRET_KEY}
+      AWS_DEFAULT_REGION: ${STORAGE_REGION:-us-east-1}
+      STORAGE_BUCKET: ${STORAGE_BUCKET:-palmr-files}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        echo "[rustfs-init] checking bucket $$STORAGE_BUCKET …"
+        if aws --endpoint-url http://rustfs:9000 s3api head-bucket --bucket "$$STORAGE_BUCKET" 2>/dev/null; then
+          echo "[rustfs-init] bucket already exists, nothing to do"
+        else
+          echo "[rustfs-init] creating bucket $$STORAGE_BUCKET"
+          aws --endpoint-url http://rustfs:9000 s3 mb "s3://$$STORAGE_BUCKET"
+        fi
+        echo "[rustfs-init] done"
     networks:
       - palmr
 
@@ -137,9 +170,9 @@ services:
     container_name: palmr-server
     restart: unless-stopped
     depends_on:
-      minio:
+      rustfs:
         condition: service_healthy
-      minio-init:
+      rustfs-init:
         condition: service_completed_successfully
     environment:
       # Auth / JWT — REQUIRED for production
@@ -150,20 +183,23 @@ services:
       BCRYPT_COST: ${BCRYPT_COST:-12}
       PRESIGNED_URL_EXPIRATION: ${PRESIGNED_URL_EXPIRATION:-3600}
 
-      # External S3 — point at the in-cluster MinIO service
+      # External S3 — point at the in-cluster RustFS service. The SDK
+      # talks to it over the docker network; path-style addressing is
+      # required (virtual-host style assumes wildcard DNS).
       ENABLE_S3: "true"
-      S3_ENDPOINT: minio
-      S3_PORT: "9379"
+      S3_ENDPOINT: rustfs
+      S3_PORT: "9000"
       S3_USE_SSL: "false"
       S3_FORCE_PATH_STYLE: "true"
-      S3_ACCESS_KEY: ${MINIO_ROOT_USER}
-      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
-      S3_BUCKET_NAME: ${MINIO_BUCKET:-palmr-files}
-      S3_REGION: ${MINIO_REGION:-us-east-1}
+      S3_ACCESS_KEY: ${STORAGE_ACCESS_KEY}
+      S3_SECRET_KEY: ${STORAGE_SECRET_KEY}
+      S3_BUCKET_NAME: ${STORAGE_BUCKET:-palmr-files}
+      S3_REGION: ${STORAGE_REGION:-us-east-1}
 
-      # Public URL of MinIO — the BROWSER must be able to reach this, so it
-      # has to be the host-reachable address, not the docker service name.
-      STORAGE_URL: ${STORAGE_URL:?STORAGE_URL is required (browser-facing MinIO URL)}
+      # Public URL of the storage service — the BROWSER must be able to
+      # reach this, so it has to be the host-reachable address, not the
+      # docker service name. Presigned URLs are signed against this host.
+      STORAGE_URL: ${STORAGE_URL:?STORAGE_URL is required (browser-facing storage URL)}
 
       DATA_DIR: /data
     volumes:
@@ -206,7 +242,7 @@ services:
       - palmr
 
 volumes:
-  minio-data:
+  rustfs-data:
   server-data:
 
 networks:

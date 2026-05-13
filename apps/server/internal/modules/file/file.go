@@ -522,9 +522,42 @@ func (h *Handler) MultipartPartURL(ctx context.Context, in *MultipartPartInput) 
 	return out, nil
 }
 
+// FilePart accepts the shape the frontend's Uppy `@uppy/aws-s3` plugin
+// produces. That plugin ships each part with capitalised `PartNumber` /
+// `ETag` (AWS's canonical casing in the XML response) AND a lowercase
+// `etag` mirror plus a `content-length` field for upload-progress
+// bookkeeping. Huma rejects unknown properties by default, so we
+// declare every casing here even though only PartNumber + ETag get
+// used downstream.
+//
+// `content-length` is typed as `any` because Uppy serialises it as
+// either a number, a string `"0"`, or even `null` depending on whether
+// the response Content-Length header parsed. We never use the value;
+// the field is here purely so huma's strict schema doesn't reject the
+// payload.
 type FilePart struct {
-	PartNumber int32  `json:"PartNumber"`
-	ETag       string `json:"ETag"`
+	PartNumber      int32  `json:"PartNumber,omitempty"`
+	ETag            string `json:"ETag,omitempty"`
+	PartNumberLower int32  `json:"partNumber,omitempty"`
+	ETagLower       string `json:"etag,omitempty"`
+	ContentLength   any    `json:"content-length,omitempty"`
+}
+
+// num returns whichever of PartNumber / partNumber was filled by the
+// client.
+func (p FilePart) num() int32 {
+	if p.PartNumber != 0 {
+		return p.PartNumber
+	}
+	return p.PartNumberLower
+}
+
+// etag returns whichever of ETag / etag was filled by the client.
+func (p FilePart) etag() string {
+	if p.ETag != "" {
+		return p.ETag
+	}
+	return p.ETagLower
 }
 type MultipartCompleteInput struct {
 	Body struct {
@@ -540,8 +573,8 @@ func (h *Handler) MultipartComplete(ctx context.Context, in *MultipartCompleteIn
 	}
 	completed := make([]s3types.CompletedPart, len(in.Body.Parts))
 	for i, p := range in.Body.Parts {
-		etag := p.ETag
-		num := p.PartNumber
+		etag := p.etag()
+		num := p.num()
 		completed[i] = s3types.CompletedPart{ETag: &etag, PartNumber: &num}
 	}
 	_, err := h.S3.Client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{

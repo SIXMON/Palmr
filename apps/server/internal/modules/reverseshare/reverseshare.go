@@ -923,9 +923,33 @@ type MpCompleteInput struct {
 	}
 }
 
+// RSPart accepts the same multi-casing shape produced by Uppy's
+// @uppy/aws-s3 plugin (see file.FilePart for the full rationale). Huma
+// rejects unknown properties by default, so we have to declare each
+// casing — including the `content-length` Uppy adds for upload-progress
+// bookkeeping — even though only PartNumber + ETag get used downstream.
+// `content-length` is `any` because Uppy ships it as a number, string,
+// or null depending on the upstream Content-Length header.
 type RSPart struct {
-	PartNumber int32  `json:"PartNumber"`
-	ETag       string `json:"ETag"`
+	PartNumber      int32  `json:"PartNumber,omitempty"`
+	ETag            string `json:"ETag,omitempty"`
+	PartNumberLower int32  `json:"partNumber,omitempty"`
+	ETagLower       string `json:"etag,omitempty"`
+	ContentLength   any    `json:"content-length,omitempty"`
+}
+
+func (p RSPart) num() int32 {
+	if p.PartNumber != 0 {
+		return p.PartNumber
+	}
+	return p.PartNumberLower
+}
+
+func (p RSPart) etag() string {
+	if p.ETag != "" {
+		return p.ETag
+	}
+	return p.ETagLower
 }
 
 func (h *Handler) MultipartComplete(ctx context.Context, in *MpCompleteInput) (*RSMsgOutput, error) {
@@ -934,8 +958,8 @@ func (h *Handler) MultipartComplete(ctx context.Context, in *MpCompleteInput) (*
 	}
 	parts := make([]s3types.CompletedPart, len(in.Body.Parts))
 	for i, p := range in.Body.Parts {
-		etag := p.ETag
-		num := p.PartNumber
+		etag := p.etag()
+		num := p.num()
 		parts[i] = s3types.CompletedPart{ETag: &etag, PartNumber: &num}
 	}
 	_, err := h.S3.Client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{

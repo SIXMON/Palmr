@@ -79,6 +79,18 @@ func (h *Handler) Setup(ctx context.Context, in *TFSetupInput) (*TFSetupOutput, 
 	if err != nil {
 		return nil, apperr.Unauthorized(err.Error())
 	}
+	// SECURITY: refuse to (re)issue a new TOTP secret if 2FA is
+	// already enabled. The pre-fix flow allowed any authenticated
+	// session (including one obtained via a stolen 30-day trusted-
+	// device cookie) to call Setup, write a fresh secret, then
+	// VerifySetup with their own TOTP — quietly hijacking the
+	// account's 2FA and neutralising Disable's password-confirmation.
+	// Users who need to rotate must Disable first.
+	var enabled bool
+	_ = h.DB.QueryRowContext(ctx, `SELECT twoFactorEnabled FROM users WHERE id = ?`, uc.UserID).Scan(&enabled)
+	if enabled {
+		return nil, apperr.BadRequest("2FA is already enabled; disable it before configuring a new authenticator")
+	}
 	var email string
 	_ = h.DB.GetContext(ctx, &email, `SELECT email FROM users WHERE id = ?`, uc.UserID)
 	issuer := in.Body.AppName

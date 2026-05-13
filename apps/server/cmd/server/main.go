@@ -231,12 +231,28 @@ func authOptional(mw *auth.Middleware) func(http.Handler) http.Handler {
 			req := r
 			if c, err := r.Cookie("token"); err == nil && c.Value != "" {
 				if claims, verr := mw.Signer.Verify(c.Value); verr == nil {
-					req = r.WithContext(auth.WithUser(r.Context(), auth.UserCtx{
-						UserID:  claims.UserID,
-						IsAdmin: claims.IsAdmin,
-						Active:  true,
-						JTI:     claims.JTI,
-					}))
+					// SECURITY: do NOT trust IsAdmin / IsActive from the
+					// JWT alone. The token lives for the full TTL even
+					// after the user is demoted or deactivated — without
+					// a live DB lookup, revoking admin or freezing an
+					// account does nothing until the user logs out and
+					// back in. We pay one indexed (`users.id` PK)
+					// SELECT per authenticated request to keep this
+					// closed; on a DB error or missing row we drop the
+					// context entirely (treated as anonymous).
+					var row struct {
+						IsAdmin  bool `db:"isAdmin"`
+						IsActive bool `db:"isActive"`
+					}
+					if err := mw.DB.GetContext(r.Context(), &row,
+						`SELECT isAdmin, isActive FROM users WHERE id = ?`, claims.UserID); err == nil && row.IsActive {
+						req = r.WithContext(auth.WithUser(r.Context(), auth.UserCtx{
+							UserID:  claims.UserID,
+							IsAdmin: row.IsAdmin,
+							Active:  true,
+							JTI:     claims.JTI,
+						}))
+					}
 				}
 			}
 			next.ServeHTTP(w, req)

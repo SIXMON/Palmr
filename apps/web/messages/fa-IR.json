@@ -328,7 +328,8 @@
     "pdfPreviewNotAvailable": "پیش‌نمایش PDF در دسترس نیست. نمایش جایگزین را امتحان کنید یا دانلود کنید",
     "tryAlternativeView": "امتحان نمایش جایگزین",
     "loadingAlternative": "در حال بارگذاری نمایش جایگزین...",
-    "loadingAudio": "در حال بارگذاری صوت..."
+    "loadingAudio": "در حال بارگذاری صوت...",
+    "downloadSuccess": "دانلود شروع شد"
   },
   "fileSelector": {
     "availableFiles": "فایل‌های موجود ({count})",

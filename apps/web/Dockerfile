@@ -1,57 +1,63 @@
 # syntax=docker/dockerfile:1.6
 #
-# Palmr frontend (Next.js standalone) — single-service image.
+# Palmr frontend — static export served by nginx.
 #
-# Build context: apps/web/ (NOT the repo root). Nothing outside this app
-# is needed at build time, so we ship only this directory to the daemon.
-# Talks to the backend over the docker network at API_BASE_URL (default
-# http://palmr-server:3333 in the split compose).
+# Pipeline:
+#   builder (Bun)  → `bun install` + `next build`. With output:"export" in
+#                    next.config.ts this produces a flat `out/` tree of
+#                    HTML/CSS/JS — no Node runtime required afterwards.
+#   runtime (nginx) → nginx:alpine serves /usr/share/nginx/html and
+#                    proxies /api/*, /e/{id}, /s/*, /r/* to the Go backend
+#                    via the rules in nginx.conf. The Go backend handles
+#                    OG-tag rendering for crawler UAs (see /og/s, /og/r).
+#
+# Build context: apps/web/. The Dockerfile reads bun.lock + package.json
+# first so the deps layer caches across source edits.
 
-FROM node:24-alpine AS base
-RUN apk add --no-cache curl
-RUN corepack enable pnpm
+# === build stage =============================================================
+FROM oven/bun:1-alpine AS builder
+
 WORKDIR /app/web
 
-# === deps stage ===
-FROM base AS deps
-COPY package.json pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile
+# Cache the dep install layer separately — package.json/bun.lock changes
+# bust it; everything else doesn't.
+COPY package.json bun.lock ./
+RUN bun install --frozen-lockfile
 
-# === build stage ===
-FROM base AS builder
-COPY --from=deps /app/web/node_modules ./node_modules
 COPY . ./
+
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV NODE_ENV=production
-RUN pnpm run build
+# `next build` with output:"export" writes a static site to ./out
+RUN bun run build
 
-# === runtime stage ===
-FROM node:24-alpine AS runner
+# === runtime stage ===========================================================
+FROM nginx:1.27-alpine AS runner
+
+# curl for the healthcheck; the rest of nginx:alpine is already what we need.
 RUN apk add --no-cache curl
 
-ENV NODE_ENV=production
-ENV NEXT_TELEMETRY_DISABLED=1
-ENV PORT=5487
-ENV HOSTNAME=0.0.0.0
-# Default points to the backend service name in docker-compose. Override at
-# runtime if the backend is reachable on a different host.
-ENV API_BASE_URL=http://palmr-server:3333
+# Backend coordinates. Defaults match docker-compose service DNS; override
+# at runtime if the backend is reachable on a different host/port.
+ENV BACKEND_HOST=palmr-server
+ENV BACKEND_PORT=3333
 
-ARG PALMR_UID=1001
-ARG PALMR_GID=1001
-RUN addgroup --system --gid ${PALMR_GID} nodejs \
- && adduser --system --uid ${PALMR_UID} --ingroup nodejs palmr
-
-WORKDIR /app/web
-COPY --from=builder --chown=palmr:nodejs /app/web/public ./public
-COPY --from=builder --chown=palmr:nodejs /app/web/.next/standalone ./
-COPY --from=builder --chown=palmr:nodejs /app/web/.next/static ./.next/static
-
-USER palmr
-
+# The compose stack listens on this; matches the previous Next.js standalone
+# port so existing reverse-proxy rules keep working.
 EXPOSE 5487
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-  CMD curl -sf http://127.0.0.1:5487/ >/dev/null || exit 1
+# nginx.conf is a template — BACKEND_HOST/BACKEND_PORT get expanded by
+# nginx's built-in envsubst pass at container start. /docker-entrypoint.d
+# scripts run in the official image before nginx starts.
+COPY nginx.conf /etc/nginx/templates/default.conf.template
 
-CMD ["node", "server.js"]
+# Static site. Owned by `nginx` UID 101 (the image's pre-baked nginx
+# user) so the worker processes can read it without root.
+COPY --from=builder --chown=nginx:nginx /app/web/out /usr/share/nginx/html
+
+# Healthcheck hits the dedicated /health endpoint declared in nginx.conf.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+  CMD curl -sf http://127.0.0.1:5487/health >/dev/null || exit 1
+
+# The default nginx:alpine entrypoint takes care of envsubst on the
+# templates directory and then `exec nginx -g 'daemon off;'`.

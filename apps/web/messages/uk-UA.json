@@ -328,7 +328,8 @@
     "pdfPreviewNotAvailable": "Попередній перегляд PDF недоступний. Спробуйте альтернативний перегляд або завантаження",
     "tryAlternativeView": "Спробувати альтернативний перегляд",
     "loadingAlternative": "Завантаження альтернативного перегляду...",
-    "loadingAudio": "Завантаження аудіо..."
+    "loadingAudio": "Завантаження аудіо...",
+    "downloadSuccess": "Завантаження розпочато"
   },
   "fileSelector": {
     "availableFiles": "Доступні файли ({count})",

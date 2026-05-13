@@ -328,7 +328,8 @@
     "pdfPreviewNotAvailable": "PDF-förhandsgranskning är inte tillgänglig. Prova alternativ vy eller ladda ner",
     "tryAlternativeView": "Prova Alternativ vy",
     "loadingAlternative": "Laddar alternativ vy...",
-    "loadingAudio": "Laddar ljud..."
+    "loadingAudio": "Laddar ljud...",
+    "downloadSuccess": "Nedladdningen startade"
   },
   "fileSelector": {
     "availableFiles": "Tillgängliga filer ({count})",

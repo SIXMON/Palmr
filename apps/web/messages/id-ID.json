@@ -328,7 +328,8 @@
     "pdfPreviewNotAvailable": "Pratinjau PDF tidak tersedia. Coba tampilan alternatif atau unduh",
     "tryAlternativeView": "Coba Tampilan Alternatif",
     "loadingAlternative": "Memuat tampilan alternatif...",
-    "loadingAudio": "Memuat audio..."
+    "loadingAudio": "Memuat audio...",
+    "downloadSuccess": "Unduhan dimulai"
   },
   "fileSelector": {
     "availableFiles": "File Tersedia ({count})",

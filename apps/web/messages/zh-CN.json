@@ -324,7 +324,8 @@
     "pdfPreviewNotAvailable": "PDF预览不可用。请尝试备用视图或下载。",
     "tryAlternativeView": "尝试备用视图",
     "loadingAlternative": "加载备用视图中...",
-    "loadingAudio": "音频加载中..."
+    "loadingAudio": "音频加载中...",
+    "downloadSuccess": "开始下载"
   },
   "fileSelector": {
     "availableFiles": "可用文件 ({count})",

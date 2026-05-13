@@ -1,69 +1,86 @@
-# syntax=docker/dockerfile:1.6
+# =============================================================================
+# Palmr Go backend — multi-stage build, final image is `FROM scratch`.
 #
-# Palmr backend (Fastify) — single-service image.
+# Stages:
+#   builder  — golang:1.23-alpine, downloads modules and produces a single
+#              static binary (CGO_ENABLED=0).
+#   tools    — alpine, only here to pull a current ca-certificates bundle
+#              that we copy into scratch.
+#   final    — FROM scratch, ~20 MB image: ca-certs + the static binary +
+#              the seed JSON files. No shell, no libc, no package manager.
 #
-# Build context: apps/server/ (NOT the repo root). Everything this image
-# needs lives under apps/server/, so the build sends only this app to the
-# Docker daemon — much faster and smaller than shipping the whole monorepo.
-# Seed support files (configs.json, providers.json, check-missing.js) live
-# under prisma/ alongside schema.prisma so they travel with the app.
-#
-# This container does NOT bundle MinIO, supervisord, or the web frontend —
-# they each run in their own service. The legacy monolithic Dockerfile at
-# the repo root is still available if you want everything in one image.
+# Pure-Go dependencies make this possible:
+#   - SQLite driver: modernc.org/sqlite (no CGO)
+#   - everything else stdlib-friendly
+# =============================================================================
 
-FROM node:24-alpine AS base
-RUN apk add --no-cache curl openssl su-exec
-RUN corepack enable pnpm
-WORKDIR /app/server
+# ----- stage 1: build the Go binary -----------------------------------------
+FROM golang:1.23-alpine AS builder
 
-# === deps stage ===
-FROM base AS deps
-COPY package*.json pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile
+# Build-time dependencies for `go mod download` (git fetches from VCS).
+RUN apk add --no-cache git ca-certificates tzdata
 
-# === build stage ===
-FROM base AS builder
-COPY --from=deps /app/server/node_modules ./node_modules
-COPY . ./
-RUN npx prisma generate
-RUN pnpm build
+WORKDIR /src
 
-# === runtime stage ===
-FROM base AS runner
+COPY go.mod go.sum ./
 
-ENV NODE_ENV=production
-ENV PORT=3333
+# First boot has no go.sum; tidy generates it. Cached after the first
+# successful build (the module cache lives in /root/go/pkg/mod and is
+# reused unless go.mod changes).
+RUN go mod download
 
-# UID/GID stay configurable so bind-mounted volumes can match host ownership.
-ARG PALMR_UID=1001
-ARG PALMR_GID=1001
-RUN addgroup --system --gid ${PALMR_GID} nodejs \
- && adduser --system --uid ${PALMR_UID} --ingroup nodejs palmr
+COPY . .
 
-# /data is the bind-mount target for SQLite + (optional) filesystem uploads.
-RUN mkdir -p /data/prisma /data/uploads /data/temp-uploads /home/palmr \
- && chown -R palmr:nodejs /data /home/palmr
+# Build flags:
+#   -trimpath           — remove host paths from the binary for reproducibility
+#   -ldflags "-s -w"    — strip symbols and DWARF, shaves ~30%
+#   -tags netgo,osusergo — use the pure-Go resolvers (no /etc/nsswitch.conf
+#                          required at runtime → works in scratch)
+RUN CGO_ENABLED=0 GOOS=linux \
+    go build \
+      -trimpath \
+      -ldflags "-s -w -extldflags '-static'" \
+      -tags 'netgo,osusergo' \
+      -o /out/palmr-server \
+      ./cmd/server
 
-# Copy compiled app (prisma/ already carries configs.json, providers.json,
-# check-missing.js so we don't need a separate COPY for them).
-COPY --from=builder --chown=palmr:nodejs /app/server/dist ./dist
-COPY --from=builder --chown=palmr:nodejs /app/server/node_modules ./node_modules
-COPY --from=builder --chown=palmr:nodejs /app/server/prisma ./prisma
-COPY --from=builder --chown=palmr:nodejs /app/server/package.json ./
+# ----- stage 2: collect a CA bundle, a passwd entry, and a prepared /data
+# directory. `FROM scratch` has no shell, so we can't `mkdir` at boot —
+# we ship the directory pre-owned by UID 1001 instead.
+FROM alpine:3.20 AS tools
+RUN apk add --no-cache ca-certificates
+RUN echo "palmr:x:1001:1001::/data:/sbin/nologin" > /tmp/passwd
+# Create /tmp/data/{prisma,uploads,temp-uploads} owned by 1001:1001 so the
+# COPY into scratch carries those permissions. A fresh Docker named
+# volume mounted at /data will inherit the 1001:1001 ownership on first
+# mount (Docker copies the existing directory contents + perms into a
+# brand-new volume), which is the only way to write inside a scratch
+# image running as a non-root user.
+RUN mkdir -p /tmp/data/prisma /tmp/data/uploads /tmp/data/temp-uploads \
+    && chown -R 1001:1001 /tmp/data
+# Stage a writable /tmp directory for the scratch image. The runtime
+# needs one for multipart-upload spillover (ParseMultipartForm writes any
+# bytes past its in-memory budget to os.TempDir(), which defaults to
+# /tmp). A scratch image has no /tmp by default, so the avatar/logo
+# upload would fail with "open /tmp/multipart-...: no such file or
+# directory" the moment a body is larger than the in-RAM budget.
+RUN mkdir -p /tmp/scratch-tmp && chown 1001:1001 /tmp/scratch-tmp && chmod 1777 /tmp/scratch-tmp
 
-COPY --chown=palmr:nodejs server-entrypoint.sh /app/server-entrypoint.sh
-RUN chmod +x /app/server-entrypoint.sh
+# ----- stage 3: final image, FROM scratch -----------------------------------
+FROM scratch
 
-# Persistent state (SQLite + uploads + temp-uploads) lives under /data so it
-# survives container recreation. The runtime image's /app/server is the read-
-# only application bundle, not the data directory.
-ENV DATA_DIR=/data
-ENV DATABASE_URL="file:/data/prisma/palmr.db"
+COPY --from=tools  /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=tools  /tmp/passwd                        /etc/passwd
+COPY --from=tools  --chown=1001:1001 /tmp/data        /data
+COPY --from=tools  --chown=1001:1001 /tmp/scratch-tmp /tmp
+COPY --from=builder /out/palmr-server                 /palmr-server
 
+# Seed JSON files (configs.json, providers.json) — the Go entrypoint copies
+# them into /data/prisma on first boot if they aren't there yet.
+COPY --from=builder /src/seed/                        /seed/
+
+USER 1001:1001
+WORKDIR /data
 EXPOSE 3333
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD curl -sf http://127.0.0.1:3333/health >/dev/null || exit 1
-
-ENTRYPOINT ["/app/server-entrypoint.sh"]
+ENTRYPOINT ["/palmr-server"]

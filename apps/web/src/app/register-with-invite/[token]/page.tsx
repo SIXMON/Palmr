@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useRouter } from "next/navigation";
 import { IconEye, IconEyeOff } from "@tabler/icons-react";
 import { motion } from "framer-motion";
 import { useTranslations } from "next-intl";
@@ -15,6 +15,7 @@ import { Button } from "@/components/ui/button";
 import { DefaultFooter } from "@/components/ui/default-footer";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { useRouteSegment } from "@/hooks/use-route-segment";
 import { registerWithInvite, validateInviteToken } from "@/http/endpoints/invite";
 
 interface RegisterFormData {
@@ -29,8 +30,9 @@ interface RegisterFormData {
 export default function RegisterWithInvitePage() {
   const t = useTranslations();
   const router = useRouter();
-  const params = useParams();
-  const token = params.token as string;
+  // Static export: useParams() returns the build-time placeholder
+  // ("_"), so read the real token from the URL bar instead.
+  const token = useRouteSegment("/register-with-invite/");
 
   const [isValidating, setIsValidating] = useState(true);
   const [tokenValid, setTokenValid] = useState(false);

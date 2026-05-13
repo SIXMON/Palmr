@@ -328,7 +328,8 @@
     "pdfPreviewNotAvailable": "Preview do PDF não está disponível. Tente o modo alternativo ou faça o download.",
     "tryAlternativeView": "Tentar Visualização Alternativa",
     "loadingAlternative": "Carregando visualização alternativa...",
-    "loadingAudio": "Carregando áudio..."
+    "loadingAudio": "Carregando áudio...",
+    "downloadSuccess": "Download iniciado"
   },
   "fileSelector": {
     "availableFiles": "Arquivos Disponíveis ({count})",

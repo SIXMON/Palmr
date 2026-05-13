@@ -1,14 +1,14 @@
 "use client";
 
-import { useParams } from "next/navigation";
-
 import { LoadingScreen } from "@/components/layout/loading-screen";
+import { useRouteSegment } from "@/hooks/use-route-segment";
 import { DefaultLayout, PasswordModal, WeTransferLayout } from "./components";
 import { useReverseShareUpload } from "./hooks/use-reverse-share-upload";
 
 export default function ReverseShareUploadPage() {
-  const params = useParams();
-  const shareAlias = params?.alias as string;
+  // Static export: useParams() returns the build-time placeholder
+  // ("_"), so read the real alias from the URL bar instead.
+  const shareAlias = useRouteSegment("/r/");
 
   const {
     reverseShare,

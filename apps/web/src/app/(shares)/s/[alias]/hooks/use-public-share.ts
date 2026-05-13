@@ -1,10 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { useParams, useRouter, useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { toast } from "sonner";
 
+import { useRouteSegment } from "@/hooks/use-route-segment";
 import { getShareByAlias } from "@/http/endpoints/index";
 import type { Share } from "@/http/endpoints/shares/types";
 import { getCachedDownloadUrl } from "@/lib/download-url-cache";
@@ -64,10 +65,11 @@ interface ShareBrowseState {
 
 export function usePublicShare() {
   const t = useTranslations();
-  const params = useParams();
   const searchParams = useSearchParams();
   const router = useRouter();
-  const alias = params?.alias as string;
+  // Static export: useParams() returns the build-time placeholder
+  // ("_"), so read the real alias from the URL bar instead.
+  const alias = useRouteSegment("/s/");
   const [share, setShare] = useState<Share | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [password, setPassword] = useState("");

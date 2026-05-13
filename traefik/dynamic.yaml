@@ -1,15 +1,3 @@
-# =============================================================================
-# Traefik dynamic configuration — Palmr stack
-# =============================================================================
-#
-# Routing summary
-#   /api/*  → palmr-server:3333  (with `/api` stripped before forward)
-#   /*      → palmr-web:5487     (catch-all, lower priority)
-#
-# Backends are referenced by docker service name so the file works as-is
-# inside the `palmr` docker network.
-# =============================================================================
-
 http:
   routers:
     palmr-api:
@@ -17,7 +5,6 @@ http:
       entryPoints:
         - web
       service: palmr-server
-      # Higher priority so /api/* wins over the catch-all below.
       priority: 100
       middlewares:
         - strip-api-prefix
@@ -30,8 +17,6 @@ http:
       priority: 1
 
   middlewares:
-    # The Fastify routes have no `/api` prefix of their own — the legacy
-    # Next.js proxy used to strip it before forwarding, so we mirror that.
     strip-api-prefix:
       stripPrefix:
         prefixes:
@@ -42,8 +27,6 @@ http:
       loadBalancer:
         servers:
           - url: "http://palmr-server:3333"
-        # Disable Traefik's response buffering so SSE / large streaming
-        # downloads aren't held in memory.
         passHostHeader: true
 
     palmr-web:

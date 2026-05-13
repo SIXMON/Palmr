@@ -1,6 +1,5 @@
 "use client";
 
-import { useRouter } from "next/navigation";
 import { IconLanguage } from "@tabler/icons-react";
 import { useLocale } from "next-intl";
 import { setCookie } from "nookies";
@@ -47,9 +46,10 @@ const RTL_LANGUAGES = ["ar-SA", "fa-IR", "he-IL"];
 
 export function LanguageSwitcher() {
   const locale = useLocale();
-  const router = useRouter();
 
   const changeLanguage = (fullLocale: string) => {
+    if (fullLocale === locale) return;
+
     const isRTL = RTL_LANGUAGES.includes(fullLocale);
     document.documentElement.dir = isRTL ? "rtl" : "ltr";
 
@@ -60,7 +60,11 @@ export function LanguageSwitcher() {
       secure: window.location.protocol === "https:",
     });
 
-    router.refresh();
+    // Static export has no server to re-render with the new cookie value
+    // (router.refresh() is a no-op in this mode), so we hard-reload. On
+    // the next boot IntlClientProvider reads the cookie and loads the
+    // matching messages bundle.
+    window.location.reload();
   };
 
   return (

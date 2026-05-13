@@ -324,7 +324,8 @@
     "pdfPreviewNotAvailable": "PDF 미리보기를 사용할 수 없습니다. 대체 보기를 시도하거나 다운로드하세요.",
     "tryAlternativeView": "대체 보기 시도",
     "loadingAlternative": "대체 보기 로딩 중...",
-    "loadingAudio": "오디오 로딩 중..."
+    "loadingAudio": "오디오 로딩 중...",
+    "downloadSuccess": "다운로드 시작됨"
   },
   "fileSelector": {
     "availableFiles": "사용 가능한 파일 ({count})",

@@ -1,5 +1,4 @@
 import { Metadata } from "next";
-import { headers } from "next/headers";
 import { getTranslations } from "next-intl/server";
 
 interface LayoutProps {
@@ -7,92 +6,36 @@ interface LayoutProps {
   params: Promise<{ alias: string }>;
 }
 
-async function getShareMetadata(alias: string) {
-  try {
-    const API_BASE_URL = process.env.API_BASE_URL || "http://localhost:3333";
-    const response = await fetch(`${API_BASE_URL}/shares/alias/${alias}/metadata`, {
-      cache: "no-store",
-    });
-
-    if (!response.ok) {
-      return null;
-    }
-
-    return await response.json();
-  } catch (error) {
-    console.error("Error fetching share metadata:", error);
-    return null;
-  }
-}
-
-async function getAppInfo() {
-  try {
-    const API_BASE_URL = process.env.API_BASE_URL || "http://localhost:3333";
-    const response = await fetch(`${API_BASE_URL}/app/info`, {
-      cache: "no-store",
-    });
-
-    if (!response.ok) {
-      return { appName: "Palmr", appDescription: "File sharing platform", appLogo: null };
-    }
-
-    return await response.json();
-  } catch (error) {
-    console.error("Error fetching app info:", error);
-    return { appName: "Palmr", appDescription: "File sharing platform", appLogo: null };
-  }
-}
-
-async function getBaseUrl(): Promise<string> {
-  const headersList = await headers();
-  const protocol = headersList.get("x-forwarded-proto") || "http";
-  const host = headersList.get("x-forwarded-host") || headersList.get("host") || "localhost:3000";
-  return `${protocol}://${host}`;
-}
-
-export async function generateMetadata({ params }: { params: Promise<{ alias: string }> }): Promise<Metadata> {
+// Static export forces this to run once at build time for the placeholder
+// alias, so we emit generic fallback OG tags here. Bots that need the
+// real share metadata are routed by nginx to /og/s/{alias} on the Go
+// backend, which renders a thin HTML page with the dynamic tags.
+export async function generateMetadata(): Promise<Metadata> {
   const t = await getTranslations();
-  const resolvedParams = await params;
-  const metadata = await getShareMetadata(resolvedParams.alias);
-  const appInfo = await getAppInfo();
-
-  const title = metadata?.name || t("share.pageTitle");
-  const description =
-    metadata?.description ||
-    (metadata?.totalFiles
-      ? t("share.metadata.filesShared", { count: metadata.totalFiles + (metadata.totalFolders || 0) })
-      : appInfo.appDescription || t("share.metadata.defaultDescription"));
-
-  const baseUrl = await getBaseUrl();
-  const shareUrl = `${baseUrl}/s/${resolvedParams.alias}`;
-
   return {
-    title,
-    description,
+    title: t("share.pageTitle"),
+    description: t("share.metadata.defaultDescription"),
     openGraph: {
-      title,
-      description,
-      url: shareUrl,
-      siteName: appInfo.appName || "Palmr",
+      title: t("share.pageTitle"),
+      description: t("share.metadata.defaultDescription"),
       type: "website",
-      images: appInfo.appLogo
-        ? [
-            {
-              url: appInfo.appLogo,
-              width: 1200,
-              height: 630,
-              alt: appInfo.appName || "Palmr",
-            },
-          ]
-        : [],
     },
     twitter: {
       card: "summary_large_image",
-      title,
-      description,
-      images: appInfo.appLogo ? [appInfo.appLogo] : [],
+      title: t("share.pageTitle"),
+      description: t("share.metadata.defaultDescription"),
     },
   };
+}
+
+// Static export requires every dynamic route to declare which params to
+// pre-render. We emit a single placeholder so Next.js generates exactly
+// one HTML scaffold for /s/[alias]; nginx rewrites all real alias URLs
+// (/s/anything-else) to that same scaffold and the client React app
+// reads window.location.pathname via useParams() to load the right
+// share at runtime.
+export function generateStaticParams() {
+  return [{ alias: "_" }];
 }
 
 export default function DashboardLayout({ children }: LayoutProps) {

@@ -328,7 +328,8 @@
     "pdfPreviewNotAvailable": "PDF preview unavailable. Try alternative view or download",
     "tryAlternativeView": "Try Alternative View",
     "loadingAlternative": "Loading alternative view...",
-    "loadingAudio": "Loading audio..."
+    "loadingAudio": "Loading audio...",
+    "downloadSuccess": "Download started"
   },
   "fileSelector": {
     "availableFiles": "Available Files ({count})",

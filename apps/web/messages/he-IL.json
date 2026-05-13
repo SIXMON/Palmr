@@ -328,7 +328,8 @@
     "pdfPreviewNotAvailable": "תצוגה מקדימה של PDF אינה זמינה. נסה תצוגה חלופית או הורד",
     "tryAlternativeView": "נסה תצוגה חלופית",
     "loadingAlternative": "טוען תצוגה חלופית...",
-    "loadingAudio": "טוען אודיו..."
+    "loadingAudio": "טוען אודיו...",
+    "downloadSuccess": "ההורדה החלה"
   },
   "fileSelector": {
     "availableFiles": "קבצים זמינים ({count})",

@@ -1,4 +1,3 @@
-import { cookies } from "next/headers";
 import { getRequestConfig } from "next-intl/server";
 
 const supportedLocales = [
@@ -30,12 +29,15 @@ const supportedLocales = [
 const envDefault = process.env.NEXT_PUBLIC_DEFAULT_LANGUAGE || "en-US";
 const DEFAULT_LOCALE = supportedLocales.includes(envDefault) ? envDefault : "en-US";
 
+// Static export: locale is baked at build time from NEXT_PUBLIC_DEFAULT_LANGUAGE.
+// We deliberately don't read `cookies()` here — that's a server-only API
+// (output:"export" disables it) and the build would fail on prerender. The
+// runtime language switcher lives in apps/web/src/components/general/
+// language-switcher.tsx and updates a NextIntlClientProvider on the
+// client side instead, which keeps the cookie behaviour for the user
+// without involving the server.
 export default getRequestConfig(async ({ locale }) => {
-  const cookieStore = cookies();
-  const cookiesList = await cookieStore;
-  const localeCookie = cookiesList.get("NEXT_LOCALE");
-
-  const resolvedLocale = localeCookie?.value || locale || DEFAULT_LOCALE;
+  const resolvedLocale = locale || DEFAULT_LOCALE;
   const finalLocale = supportedLocales.includes(resolvedLocale) ? resolvedLocale : DEFAULT_LOCALE;
 
   try {

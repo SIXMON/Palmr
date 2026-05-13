@@ -324,7 +324,8 @@
     "pdfPreviewNotAvailable": "PDF-Vorschau ist nicht verfügbar. Versuchen Sie die alternative Ansicht oder laden Sie herunter.",
     "tryAlternativeView": "Alternative Ansicht Versuchen",
     "loadingAlternative": "Lade alternative Ansicht...",
-    "loadingAudio": "Audio wird geladen..."
+    "loadingAudio": "Audio wird geladen...",
+    "downloadSuccess": "Download gestartet"
   },
   "fileSelector": {
     "availableFiles": "Verfügbare Dateien ({count})",

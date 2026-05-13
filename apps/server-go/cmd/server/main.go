@@ -29,6 +29,7 @@ import (
 	"github.com/sixmon/palmr/apps/server-go/internal/modules/folder"
 	"github.com/sixmon/palmr/apps/server-go/internal/modules/health"
 	"github.com/sixmon/palmr/apps/server-go/internal/modules/invite"
+	"github.com/sixmon/palmr/apps/server-go/internal/modules/og"
 	"github.com/sixmon/palmr/apps/server-go/internal/modules/reverseshare"
 	"github.com/sixmon/palmr/apps/server-go/internal/modules/share"
 	storagemod "github.com/sixmon/palmr/apps/server-go/internal/modules/storage"
@@ -163,6 +164,14 @@ func run() error {
 	// -------------------------------------------------------------------------
 	embedH := &embedmod.Handler{DB: conn, S3: s3client}
 	embedH.RegisterPlain(r)
+
+	// -------------------------------------------------------------------------
+	// OG-tag HTML pages for crawler User-Agents. Wired here (not huma) because
+	// the response is HTML, not JSON. nginx splits crawlers off to /og/s/* and
+	// /og/r/* via User-Agent matching; humans get the static SPA instead.
+	// -------------------------------------------------------------------------
+	ogH := &og.Handler{DB: conn}
+	ogH.RegisterPlain(r)
 
 	// -------------------------------------------------------------------------
 	// Multipart upload routes (avatars + app logo) — chi-native because

@@ -328,7 +328,8 @@
     "pdfPreviewNotAvailable": "Η προεπισκόπηση PDF δεν είναι διαθέσιμη. Δοκιμάστε εναλλακτική προβολή ή κάντε λήψη",
     "tryAlternativeView": "Δοκιμάστε εναλλακτική προβολή",
     "loadingAlternative": "Φόρτωση εναλλακτικής προβολής...",
-    "loadingAudio": "Φόρτωση ήχου..."
+    "loadingAudio": "Φόρτωση ήχου...",
+    "downloadSuccess": "Η λήψη ξεκίνησε"
   },
   "fileSelector": {
     "availableFiles": "Διαθέσιμα αρχεία ({count})",

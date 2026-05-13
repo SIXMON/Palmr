@@ -328,7 +328,8 @@
     "pdfPreviewNotAvailable": "Không có bản xem trước PDF. Hãy thử chế độ xem thay thế hoặc tải xuống",
     "tryAlternativeView": "Thử chế độ xem thay thế",
     "loadingAlternative": "Đang tải chế độ xem thay thế...",
-    "loadingAudio": "Đang tải âm thanh..."
+    "loadingAudio": "Đang tải âm thanh...",
+    "downloadSuccess": "Đã bắt đầu tải xuống"
   },
   "fileSelector": {
     "availableFiles": "Tệp có sẵn ({count})",

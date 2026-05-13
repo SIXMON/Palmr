@@ -328,7 +328,8 @@
     "pdfPreviewNotAvailable": "ตัวอย่าง PDF ไม่พร้อมใช้งาน ลองมุมมองอื่นหรือดาวน์โหลด",
     "tryAlternativeView": "ลองมุมมองอื่น",
     "loadingAlternative": "กำลังโหลดมุมมองอื่น...",
-    "loadingAudio": "กำลังโหลดเสียง..."
+    "loadingAudio": "กำลังโหลดเสียง...",
+    "downloadSuccess": "เริ่มดาวน์โหลดแล้ว"
   },
   "fileSelector": {
     "availableFiles": "ไฟล์ที่พร้อมใช้งาน ({count})",

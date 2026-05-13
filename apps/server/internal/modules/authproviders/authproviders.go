@@ -611,13 +611,15 @@ func (h *Handler) oauth2Config(ctx context.Context, p Provider) (*oauth2.Config,
 		Scopes:       scopes,
 	}
 
-	issuer := strings.TrimRight(deref(p.IssuerURL), "/")
+	rawIssuer := deref(p.IssuerURL)
+	trimmedIssuer := strings.TrimRight(rawIssuer, "/")
 
 	// Prefer OIDC discovery — one round-trip and the IdP can rev its
 	// endpoint URLs without an admin edit on our side.
-	if issuer != "" {
-		if prov, err := oidc.NewProvider(ctx, issuer); err == nil {
+	if rawIssuer != "" {
+		if prov, err := discoverOIDCProvider(ctx, rawIssuer); err == nil {
 			conf.Endpoint = prov.Endpoint()
+			conf.Endpoint.AuthStyle = oauth2.AuthStyleInParams
 			return conf, ctx
 		}
 		// Discovery failed (network error, missing /.well-known/
@@ -630,10 +632,44 @@ func (h *Handler) oauth2Config(ctx context.Context, p Provider) (*oauth2.Config,
 	}
 
 	conf.Endpoint = oauth2.Endpoint{
-		AuthURL:  resolveAgainstIssuer(issuer, deref(p.AuthorizationEndpoint)),
-		TokenURL: resolveAgainstIssuer(issuer, deref(p.TokenEndpoint)),
+		AuthURL:  resolveAgainstIssuer(trimmedIssuer, deref(p.AuthorizationEndpoint)),
+		TokenURL: resolveAgainstIssuer(trimmedIssuer, deref(p.TokenEndpoint)),
+		// Force credentials into the form body. The Go oauth2 lib's
+		// default AuthStyleAutoDetect tries Basic Auth first and only
+		// retries with body creds on a 401 from the IdP. defguard (and
+		// a few others) returns 400 BadRequest when Basic Auth client
+		// lookup fails — Go never retries with the body, the request
+		// arrives with no resolvable client, and defguard's catch-all
+		// returns the misleading `unsupported_grant_type` error.
+		AuthStyle: oauth2.AuthStyleInParams,
 	}
 	return conf, ctx
+}
+
+// discoverOIDCProvider runs OIDC discovery, retrying once with a
+// toggled trailing slash on the issuer URL. The go-oidc lib does a
+// byte-exact comparison between the URL passed here and the `issuer`
+// claim returned by the IdP's /.well-known/openid-configuration; some
+// IdPs (defguard 1.6 is a known case) advertise the issuer with a
+// trailing slash even when the admin configured the URL without one,
+// and vice versa, so a plain literal compare false-rejects what is
+// the same logical issuer. Retrying with the slash toggled covers both
+// directions without dropping the issuer check entirely.
+func discoverOIDCProvider(ctx context.Context, issuer string) (*oidc.Provider, error) {
+	prov, firstErr := oidc.NewProvider(ctx, issuer)
+	if firstErr == nil {
+		return prov, nil
+	}
+	alt := strings.TrimRight(issuer, "/")
+	if alt == issuer {
+		alt = issuer + "/"
+	}
+	if alt != issuer {
+		if prov, err := oidc.NewProvider(ctx, alt); err == nil {
+			return prov, nil
+		}
+	}
+	return nil, firstErr
 }
 
 // resolveAgainstIssuer prefixes a relative endpoint path with the
@@ -654,14 +690,14 @@ func resolveAgainstIssuer(issuer, endpoint string) string {
 }
 
 func (h *Handler) fetchIdentity(ctx context.Context, p Provider, tok *oauth2.Token) (email, sub string, err error) {
-	issuer := strings.TrimRight(deref(p.IssuerURL), "/")
+	rawIssuer := deref(p.IssuerURL)
 
 	// Prefer OIDC discovery — id-token verification + userinfo come
 	// for free. Falls through to the manual /userinfo path if the IdP
 	// doesn't expose /.well-known/openid-configuration at the
 	// configured issuer URL.
-	if issuer != "" {
-		if prov, err := oidc.NewProvider(ctx, issuer); err == nil {
+	if rawIssuer != "" {
+		if prov, err := discoverOIDCProvider(ctx, rawIssuer); err == nil {
 			rawID, ok := tok.Extra("id_token").(string)
 			if ok && rawID != "" {
 				verifier := prov.Verifier(&oidc.Config{ClientID: deref(p.ClientID)})

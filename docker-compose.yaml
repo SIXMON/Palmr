@@ -6,14 +6,14 @@
 #   traefik      — HTTP router that fans out /api → backend, / → frontend
 #   minio        — S3-compatible object store (image: minio/minio)
 #   minio-init   — one-shot job that creates the bucket on first boot
-#   palmr-server — Fastify backend (Dockerfile: apps/server/Dockerfile)
-#   palmr-web    — Next.js frontend  (Dockerfile: apps/web/Dockerfile)
+#   palmr-server — Go backend         (Dockerfile: apps/server/Dockerfile)
+#   palmr-web    — Next.js static export served by nginx (apps/web/Dockerfile)
 #
 # Public traffic shape
-#   The web client makes API calls against /api/... on the same origin as the
-#   page. Traefik strips the /api prefix and forwards them to palmr-server.
-#   Everything else falls through to palmr-web. The frontend no longer needs
-#   per-route Next.js proxy handlers — the router does it once for all of them.
+#   Traefik forwards everything to palmr-web (nginx). The nginx in that
+#   container serves the static export and reverse-proxies /api/*, /e/{id},
+#   and the crawler-targeted /og/* paths to palmr-server on the docker
+#   network. There's no longer any Node runtime on the frontend side.
 #
 # Most settings come from a `.env` file at the repo root. See `.env.example`
 # for the full list of variables you need to set before first start.
@@ -123,24 +123,17 @@ services:
       - palmr
 
   # ---------------------------------------------------------------------------
-  # Backend (Fastify). Talks to MinIO via the docker network using the
-  # S3-compatible API. The web frontend talks to it on the docker network via
-  # API_BASE_URL=http://palmr-server:3333 — no need to publish the port unless
-  # you want direct API access from the host.
+  # Backend (Go). Talks to MinIO via the docker network using the
+  # S3-compatible API. The web frontend talks to it on the docker network
+  # via the nginx proxy in apps/web (BACKEND_HOST=palmr-server:3333) — no
+  # need to publish the port unless you want direct API access from the
+  # host.
   # ---------------------------------------------------------------------------
-  palmr-server-js:
-    profiles: ["js-backend"]
+  palmr-server:
     build:
-      # Context scoped to apps/server/ — the build doesn't need anything from
-      # the rest of the monorepo. Seed support files (configs.json,
-      # providers.json, check-missing.js) now live under prisma/ so they
-      # travel with this context.
       context: ./apps/server
       dockerfile: Dockerfile
-      args:
-        PALMR_UID: ${PALMR_UID:-1001}
-        PALMR_GID: ${PALMR_GID:-1001}
-    image: ghcr.io/sixmon/palmr-server:latest
+    image: ghcr.io/sixmon/palmr-server-go:dev
     container_name: palmr-server
     restart: unless-stopped
     depends_on:
@@ -172,76 +165,14 @@ services:
       # has to be the host-reachable address, not the docker service name.
       STORAGE_URL: ${STORAGE_URL:?STORAGE_URL is required (browser-facing MinIO URL)}
 
-      PALMR_UID: ${PALMR_UID:-1001}
-      PALMR_GID: ${PALMR_GID:-1001}
-    volumes:
-      - server-data:/data
-    # The host no longer needs to publish 3333 — Traefik routes /api/* to it
-    # on the docker network. Uncomment the next block if you want direct
-    # access from outside for debugging.
-    # ports:
-    #   - "${SERVER_PORT:-3333}:3333"
-    healthcheck:
-      # /health is on the API root (no `/api` prefix on the backend itself).
-      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:3333/health || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 10
-      start_period: 20s
-    networks:
-      - palmr
-
-  # ---------------------------------------------------------------------------
-  # WIP — Go rewrite of the backend (apps/server-go). Same SQLite DB and
-  # the same /data layout as the Node backend, so they can coexist for the
-  # duration of the port.
-  #
-  # Behind the `go-backend` compose profile so it stays inert by default:
-  #
-  #     docker compose --profile go-backend build palmr-server-go
-  #     docker compose --profile go-backend up -d palmr-server-go
-  #
-  # MVP scope (today): /health, /app/*, /auth/{login,logout,me,register},
-  # /users/*. Everything else still has to be served by palmr-server. See
-  # apps/server-go/README.md for the porting checklist.
-  # ---------------------------------------------------------------------------
-  palmr-server-go:
-    profiles: ["go-backend"]
-    build:
-      context: ./apps/server-go
-      dockerfile: Dockerfile
-    image: ghcr.io/sixmon/palmr-server-go:dev
-    container_name: palmr-server
-    restart: unless-stopped
-    depends_on:
-      minio:
-        condition: service_healthy
-      minio-init:
-        condition: service_completed_successfully
-    environment:
-      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required (at least 32 chars)}
-      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:?CORS_ALLOWED_ORIGINS is required (comma-separated)}
-      SECURE_SITE: ${SECURE_SITE:-true}
-      MAX_BODY_SIZE_MB: ${MAX_BODY_SIZE_MB:-100}
-      BCRYPT_COST: ${BCRYPT_COST:-12}
-      PRESIGNED_URL_EXPIRATION: ${PRESIGNED_URL_EXPIRATION:-3600}
-      ENABLE_S3: "true"
-      S3_ENDPOINT: minio
-      S3_PORT: "9379"
-      S3_USE_SSL: "false"
-      S3_FORCE_PATH_STYLE: "true"
-      S3_ACCESS_KEY: ${MINIO_ROOT_USER}
-      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
-      S3_BUCKET_NAME: ${MINIO_BUCKET:-palmr-files}
-      S3_REGION: ${MINIO_REGION:-us-east-1}
-      STORAGE_URL: ${STORAGE_URL:?STORAGE_URL is required}
       DATA_DIR: /data
     volumes:
       - server-data:/data
-    ports:
-      # Published on the host so you can smoke-test it side-by-side with
-      # the Node backend (which keeps :3333 inside the docker network).
-      - "${SERVER_GO_PORT:-3334}:3333"
+    # The host no longer needs to publish 3333 — the nginx in palmr-web
+    # routes /api/* to it on the docker network. Uncomment the next block
+    # for direct access from outside (debugging).
+    # ports:
+    #   - "${SERVER_PORT:-3333}:3333"
     healthcheck:
       test: ["CMD", "/palmr-server", "-healthcheck"]
       interval: 15s
@@ -252,26 +183,23 @@ services:
       - palmr
 
   # ---------------------------------------------------------------------------
-  # Frontend (Next.js standalone). Static UI + SSR for the share/embed
-  # routes. API calls from the browser go to `/api/*` on the same origin and
-  # are routed by Traefik directly to palmr-server (used to be proxied
-  # through Next.js route handlers — those are gone now). The SSR layouts
-  # still need API_BASE_URL because they fetch from the server process,
-  # which stays on the docker network.
+  # Frontend — Next.js static export served by nginx. The same nginx
+  # reverse-proxies /api/* and the OG-tag paths to palmr-server on the
+  # docker network, so the only env vars it needs are BACKEND_HOST +
+  # BACKEND_PORT (resolved at request time via Docker's embedded DNS, so
+  # the container survives backend restarts).
   # ---------------------------------------------------------------------------
   palmr-web:
     build:
       # Context scoped to apps/web/ — nothing outside this app is needed.
       context: ./apps/web
       dockerfile: Dockerfile
-      args:
-        PALMR_UID: ${PALMR_UID:-1001}
-        PALMR_GID: ${PALMR_GID:-1001}
     image: ghcr.io/sixmon/palmr-web:latest
     container_name: palmr-web
     restart: unless-stopped
     environment:
-      API_BASE_URL: http://palmr-server:3333
+      BACKEND_HOST: palmr-server
+      BACKEND_PORT: "3333"
       NEXT_PUBLIC_DEFAULT_LANGUAGE: ${DEFAULT_LANGUAGE:-en-US}
     # No host port — Traefik routes the catch-all (`/`) here.
     networks:

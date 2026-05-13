@@ -1,15 +1,12 @@
-# Build context = apps/server/. Keep only what the Dockerfile actually needs.
-node_modules
-dist
-.env
-.env.*
-*.log
-
-# Local SQLite — never bake into the image.
-prisma/*.db
-prisma/*.db-journal
-
-# IDE / OS
+# Don't ship test/build artifacts into the build context.
+.git
 .idea
 .vscode
-.DS_Store
+*.test
+*.out
+*.log
+
+# Local go cache (we use the builder image's own cache).
+.cache/
+bin/
+dist/

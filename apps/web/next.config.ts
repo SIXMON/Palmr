@@ -8,9 +8,15 @@ const nextConfig: NextConfig = {
   // (see nginx.conf for the /api proxy + /e/{id} proxy + /og/{s,r}/...
   // bot-UA split).
   output: "export",
-  // trailingSlash keeps every route as a directory with index.html so
-  // nginx's `try_files` patterns stay simple (`/login/` → `/login/index.html`).
-  trailingSlash: true,
+  // trailingSlash:false → Next.js generates `out/login.html` rather
+  // than `out/login/index.html`. nginx serves the .html file directly
+  // via `try_files $uri $uri.html …`, so the user sees `/login` in
+  // their URL bar with no 301 round-trip. Switching to true would
+  // make every first-visit URL emit a redirect to append the slash —
+  // unnecessary noise, especially behind a TLS proxy where nginx
+  // would have to know the public scheme/port to build the redirect
+  // correctly.
+  trailingSlash: false,
   // Static export can't run the Image Optimization API at runtime, so
   // images get served as-is. We don't use next/image transforms heavily
   // anyway — most images come from the backend already sized.

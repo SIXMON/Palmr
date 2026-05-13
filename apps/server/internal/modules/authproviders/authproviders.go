@@ -19,6 +19,7 @@ package authproviders
 
 import (
 	dbtypes "github.com/sixmon/palmr/apps/server/internal/db"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -27,7 +28,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -562,6 +565,13 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 	// so the host/scheme is consistent (assuming the proxy didn't
 	// swap behind our back between the two hops).
 	conf.RedirectURL = h.effectiveRedirectURI(r, name, p)
+	// Inject a logging HTTP client so a failed token exchange (the
+	// most common spot for opaque OAuth bugs) writes the request +
+	// response to the server log. Client secret is masked on the way
+	// out so the log stays grep-friendly without leaking the secret.
+	ctx = context.WithValue(ctx, oauth2.HTTPClient, &http.Client{
+		Transport: &oidcDebugTransport{base: http.DefaultTransport, provider: name},
+	})
 	tok, err := conf.Exchange(ctx, code, oauth2.SetAuthURLParam("code_verifier", st.CodeVerifier))
 	if err != nil {
 		apperr.WriteJSON(w, http.StatusBadGateway, "token exchange: "+err.Error())
@@ -834,11 +844,27 @@ func (h *Handler) loadByName(ctx context.Context, name string) (Provider, error)
 	return p, err
 }
 
+// frontendURL reconstructs the public URL of the frontend from the
+// incoming request. It is used to build the post-OAuth redirect target
+// (e.g. "https://palmr.example.com/auth/callback") and the
+// auto-generated OAuth redirect_uri.
+//
+// Port-stripping policy:
+//
+//   * X-Forwarded-Port wins when present — trust the edge proxy.
+//   * Otherwise, if the scheme is HTTPS and the host carries any
+//     non-standard port, strip it. The most common reason a port ends
+//     up in Host / X-Forwarded-Host here is a proxy chain (Cloudflare /
+//     host-nginx → host:5487 → Traefik → palmr-web nginx) where the
+//     outer proxy forwards the *upstream* URL rather than the
+//     *original* one, so what arrives is `partagev2.example.com:5487`
+//     even though the browser asked for plain `partagev2.example.com`.
+//     Stripping it makes the redirect land back on the same origin
+//     the user came from. If the operator legitimately runs HTTPS on
+//     :8443, they should set X-Forwarded-Port at the edge.
+//   * Plain HTTP keeps the port — `http://localhost:5487` is a valid
+//     dev URL we don't want to mangle.
 func (h *Handler) frontendURL(r *http.Request) string {
-	host := r.Host
-	if v := r.Header.Get("X-Forwarded-Host"); v != "" {
-		host = strings.SplitN(v, ",", 2)[0]
-	}
 	scheme := "http"
 	if r.TLS != nil {
 		scheme = "https"
@@ -846,7 +872,33 @@ func (h *Handler) frontendURL(r *http.Request) string {
 	if v := r.Header.Get("X-Forwarded-Proto"); v != "" {
 		scheme = strings.SplitN(v, ",", 2)[0]
 	}
-	return scheme + "://" + strings.TrimSpace(host)
+
+	host := r.Host
+	if v := r.Header.Get("X-Forwarded-Host"); v != "" {
+		host = strings.SplitN(v, ",", 2)[0]
+	}
+	host = strings.TrimSpace(host)
+
+	if xfp := strings.TrimSpace(r.Header.Get("X-Forwarded-Port")); xfp != "" {
+		// Explicit signal from the edge — strip whatever port is on
+		// host and re-append the forwarded one, unless it's the
+		// scheme default.
+		if i := strings.LastIndexByte(host, ':'); i >= 0 {
+			host = host[:i]
+		}
+		if (scheme == "https" && xfp != "443") || (scheme == "http" && xfp != "80") {
+			host = host + ":" + xfp
+		}
+	} else if scheme == "https" {
+		// Heuristic strip: HTTPS + any non-443 port is almost always
+		// a leak of an internal proxy chain port. See comment block
+		// above for the rationale.
+		if i := strings.LastIndexByte(host, ':'); i >= 0 {
+			host = host[:i]
+		}
+	}
+
+	return scheme + "://" + host
 }
 
 func deref(p *string) string {
@@ -880,4 +932,72 @@ func genState() string {
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+// -----------------------------------------------------------------------------
+// OAuth diagnostics
+// -----------------------------------------------------------------------------
+
+// oidcDebugTransport wraps an http.RoundTripper to log the request +
+// response when the upstream IdP returns a non-2xx. Plugged into the
+// token-exchange call via context-injected oauth2.HTTPClient. We log
+// on failure only because successful flows are noise-free and our
+// secret is in the body (we'd rather not write it to stdout on
+// happy-path).
+//
+// `client_secret`, `code`, and `code_verifier` are masked before
+// logging — these are PKCE / OAuth secrets we don't want grep'ing
+// out of container logs.
+type oidcDebugTransport struct {
+	base     http.RoundTripper
+	provider string
+}
+
+func (t *oidcDebugTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	// Capture the request body up-front so we can log it after the
+	// round-trip (req.Body is normally consumed by RoundTrip).
+	var reqBody []byte
+	if req.Body != nil {
+		reqBody, _ = io.ReadAll(req.Body)
+		req.Body = io.NopCloser(bytes.NewReader(reqBody))
+	}
+	resp, err := t.base.RoundTrip(req)
+	if err != nil {
+		slog.Error("oidc token exchange transport error",
+			"provider", t.provider, "url", req.URL.String(), "err", err.Error())
+		return resp, err
+	}
+	if resp.StatusCode < 400 {
+		return resp, err
+	}
+	// Drain + restore response body so the oauth2 lib still sees it.
+	respBody, _ := io.ReadAll(resp.Body)
+	resp.Body = io.NopCloser(bytes.NewReader(respBody))
+	slog.Error("oidc token exchange failed",
+		"provider", t.provider,
+		"url", req.URL.String(),
+		"status", resp.StatusCode,
+		"request_body", maskOAuthSecrets(string(reqBody)),
+		"request_basic_auth", req.Header.Get("Authorization") != "",
+		"response_body", string(respBody),
+	)
+	return resp, err
+}
+
+// maskOAuthSecrets replaces secret-bearing form fields with `***` so
+// the log line stays readable without leaking credentials.
+func maskOAuthSecrets(body string) string {
+	if body == "" {
+		return ""
+	}
+	vals, err := url.ParseQuery(body)
+	if err != nil {
+		return "<unparseable form>"
+	}
+	for _, k := range []string{"client_secret", "code", "code_verifier", "refresh_token"} {
+		if vals.Has(k) {
+			vals.Set(k, "***")
+		}
+	}
+	return vals.Encode()
 }

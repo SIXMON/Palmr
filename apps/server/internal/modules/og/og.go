@@ -155,8 +155,10 @@ func (h *Handler) appBranding(ctx context.Context, r *http.Request) (siteName, i
 	return siteName, absoluteURL(r, logo)
 }
 
-// absoluteURL reconstructs the public URL from forwarded headers. Behind
-// the typical Traefik/nginx chain we always see X-Forwarded-Proto and
+// absoluteURL reconstructs the public URL from forwarded headers.
+// Mirrors the port-stripping policy of authproviders.frontendURL() —
+// see that function for the rationale. Behind the typical
+// Traefik/nginx chain we always see X-Forwarded-Proto and
 // X-Forwarded-Host; we fall back to r.Host (no scheme) when those are
 // missing.
 func absoluteURL(r *http.Request, path string) string {
@@ -170,7 +172,22 @@ func absoluteURL(r *http.Request, path string) string {
 	if v := r.Header.Get("X-Forwarded-Host"); v != "" {
 		host = strings.SplitN(v, ",", 2)[0]
 	}
-	return scheme + "://" + strings.TrimSpace(host) + path
+	host = strings.TrimSpace(host)
+
+	if xfp := strings.TrimSpace(r.Header.Get("X-Forwarded-Port")); xfp != "" {
+		if i := strings.LastIndexByte(host, ':'); i >= 0 {
+			host = host[:i]
+		}
+		if (scheme == "https" && xfp != "443") || (scheme == "http" && xfp != "80") {
+			host = host + ":" + xfp
+		}
+	} else if scheme == "https" {
+		if i := strings.LastIndexByte(host, ':'); i >= 0 {
+			host = host[:i]
+		}
+	}
+
+	return scheme + "://" + host + path
 }
 
 func render(w http.ResponseWriter, v shareView) {

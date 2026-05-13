@@ -83,7 +83,7 @@ function Hero() {
         </PulsatingButton>
         <RippleButton>
           <a
-            href="https://github.com/kyantech/Palmr"
+            href="https://github.com/SIXMON/Palmr"
             target="_blank"
             rel="noreferrer noopener"
             className="flex gap-2 items-center"
@@ -272,7 +272,7 @@ function GetStarted() {
             </PulsatingButton>
             <RippleButton>
               <a
-                href="https://github.com/kyantech/Palmr"
+                href="https://github.com/SIXMON/Palmr"
                 target="_blank"
                 rel="noreferrer noopener"
                 className="flex gap-2 items-center"

@@ -20,7 +20,7 @@ export const baseOptions: BaseLayoutProps = {
     },
     {
       text: "Github",
-      url: "https://github.com/kyantech/Palmr",
+      url: "https://github.com/SIXMON/Palmr",
       active: "nested-url",
       icon: (
         <>

@@ -13,9 +13,9 @@ Before you can contribute, you need to be logged into your GitHub account. If yo
 
 ### Step 2: Go to the Palmr Repository
 
-Once you're logged in, go to the Palmr repository by clicking on this link: **[https://github.com/kyantech/Palmr](https://github.com/kyantech/Palmr)**.
+Once you're logged in, go to the Palmr repository by clicking on this link: **[https://github.com/SIXMON/Palmr](https://github.com/SIXMON/Palmr)**.
 
-Alternatively, you can search for "Palmr" in the GitHub search bar and click on the repository owned by **kyantech**.
+Alternatively, you can search for "Palmr" in the GitHub search bar and click on the repository owned by **SIXMON**.
 
 ---
 
@@ -51,7 +51,7 @@ Before making changes, ensure your local repository is set up to track the `next
 1. Add the original Palmr repository as a remote:
 
    ```bash
-   git remote add upstream https://github.com/kyantech/Palmr.git
+   git remote add upstream https://github.com/SIXMON/Palmr.git
    ```
 2. Fetch the latest changes from the `next` branch:
 
@@ -122,7 +122,7 @@ Now that your changes are on GitHub, you can open a **Pull Request (PR)** to pro
 1. Go to your forked repository on GitHub.
 2. Click the **Pull Request** button.
 3. On the PR creation page:
-   - Set the **base repository** to `kyantech/Palmr`.
+   - Set the **base repository** to `SIXMON/Palmr`.
    - Set the **base branch** to `next`.
    - Set the **head repository** to your forked repository.
    - Set the **compare branch** to your branch (`your-branch-name`).

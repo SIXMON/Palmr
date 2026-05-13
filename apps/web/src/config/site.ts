@@ -22,7 +22,7 @@ export const siteConfig = {
     },
   ],
   links: {
-    github: "https://github.com/kyantech/Palmr",
+    github: "https://github.com/SIXMON/Palmr",
     docs: "https://palmr.kyantech.com.br",
     sponsor: "https://github.com/sponsors/kyantech",
   },

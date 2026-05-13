@@ -5,7 +5,6 @@ export interface FolderItem {
   name: string;
   description: string | null;
   parentId: string | null;
-  userId: string;
   createdAt: string;
   updatedAt: string;
   totalSize?: string;

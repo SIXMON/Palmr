@@ -60,10 +60,15 @@ type FileSummary struct {
 	Extension   string            `json:"extension"`
 	Size        dbtypes.BigIntStr `json:"size"`
 	ObjectName  string            `json:"objectName"`
-	UserID      string            `json:"userId"`
-	FolderID    *string           `json:"folderId"`
-	CreatedAt   string            `json:"createdAt"`
-	UpdatedAt   string            `json:"updatedAt"`
+	// UserID is omitempty so the anonymous public-share path can drop
+	// it (the public alias view clears the field before append). Owner
+	// views always carry a real value. Without dropping this, an
+	// anonymous visitor with one share alias can enumerate the
+	// creator's other shares via the shared userId.
+	UserID    string  `json:"userId,omitempty"`
+	FolderID  *string `json:"folderId"`
+	CreatedAt string  `json:"createdAt"`
+	UpdatedAt string  `json:"updatedAt"`
 }
 
 type FolderSummary struct {
@@ -539,9 +544,15 @@ type ShareAliasInput struct {
 		Alias *string `json:"alias,omitempty"`
 	}
 }
+// ShareAliasBody matches the frontend `ShareAlias` type — 5 fields.
+// Earlier this only carried {alias, shareId}; the missing id/createdAt/
+// updatedAt left consumers reading undefined.
 type ShareAliasBody struct {
-	Alias   string `json:"alias"`
-	ShareID string `json:"shareId"`
+	ID        string `json:"id"`
+	Alias     string `json:"alias"`
+	ShareID   string `json:"shareId"`
+	CreatedAt string `json:"createdAt"`
+	UpdatedAt string `json:"updatedAt"`
 }
 type ShareAliasOutput struct {
 	Body struct {
@@ -576,9 +587,15 @@ func (h *Handler) CreateAlias(ctx context.Context, in *ShareAliasInput) (*ShareA
 	if err != nil {
 		return nil, apperr.Conflict("alias already taken or share already aliased")
 	}
+	stamp := now.Format(time.RFC3339)
 	out := &ShareAliasOutput{}
-	out.Body.Alias.Alias = alias
-	out.Body.Alias.ShareID = in.ShareID
+	out.Body.Alias = ShareAliasBody{
+		ID:        id,
+		Alias:     alias,
+		ShareID:   in.ShareID,
+		CreatedAt: stamp,
+		UpdatedAt: stamp,
+	}
 	return out, nil
 }
 
@@ -1003,6 +1020,11 @@ func (h *Handler) publicView(ctx context.Context, shareID string) (publicView, e
 		_ = rowsF.Scan(&fs.ID, &fs.Name, &fs.Description, &fs.Extension, &fs.Size, &fs.ObjectName, &fs.UserID, &fs.FolderID, &created, &updated)
 		fs.CreatedAt = created.Time.Format(time.RFC3339)
 		fs.UpdatedAt = updated.Time.Format(time.RFC3339)
+		// Strip the creator userId on the anonymous public-share path —
+		// anonymous visitors don't need to know who owns the share.
+		// FileSummary.UserID has `omitempty`, so an empty string drops
+		// the field from the JSON entirely.
+		fs.UserID = ""
 		v.Files = append(v.Files, fs)
 	}
 

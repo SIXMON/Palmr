@@ -134,16 +134,63 @@ func (h *Handler) RegisterPlain(r chi.Router) {
 
 // -----------------------------------------------------------------------------
 
-type APListOutput struct{ Body struct{ Success bool `json:"success"`; Data []Provider `json:"data"` } }
+// APListOutput is the admin shape returned by /auth/providers/all — it
+// includes the full DB row (secrets aside, those have `json:"-"`).
+type APListOutput struct {
+	Body struct {
+		Success bool       `json:"success"`
+		Data    []Provider `json:"data"`
+	}
+}
 
-func (h *Handler) ListEnabled(ctx context.Context, _ *struct{}) (*APListOutput, error) {
-	out := &APListOutput{}
+// EnabledProviderView is the public shape for /auth/providers — only
+// the fields the login page needs to render a provider button. We do
+// NOT expose clientId, issuerUrl, redirectUri, autoRegister,
+// adminEmailDomains, sortOrder, etc. — those are operational config,
+// not user-facing.
+//
+// AuthURL is the URL the login button redirects to; pointing at the
+// OAuth-dance entrypoint registered by RegisterPlain. We emit it as a
+// relative path so the browser resolves it against whatever public
+// origin the frontend is served from (works for nginx-proxied,
+// Traefik-routed, and direct deploys without extra config).
+type EnabledProviderView struct {
+	ID          string  `json:"id"`
+	Name        string  `json:"name"`
+	DisplayName string  `json:"displayName"`
+	Type        string  `json:"type"`
+	Icon        *string `json:"icon,omitempty"`
+	AuthURL     string  `json:"authUrl"`
+}
+
+// APEnabledListOutput is the response shape for /auth/providers, mapped
+// to the frontend's `EnabledProvidersResponse = ApiResponse<EnabledAuthProvider[]>`.
+type APEnabledListOutput struct {
+	Body struct {
+		Success bool                  `json:"success"`
+		Data    []EnabledProviderView `json:"data"`
+	}
+}
+
+func (h *Handler) ListEnabled(ctx context.Context, _ *struct{}) (*APEnabledListOutput, error) {
+	out := &APEnabledListOutput{}
 	// Pre-initialise so an empty result serialises as `[]`, not `null`.
-	out.Body.Data = []Provider{}
-	_ = h.DB.SelectContext(ctx, &out.Body.Data,
-		`SELECT id, name, displayName, type, icon, enabled, issuerUrl, clientId, redirectUri, scope,
-		        authorizationEndpoint, tokenEndpoint, userInfoEndpoint, metadata, autoRegister, adminEmailDomains, sortOrder, createdAt, updatedAt
-		 FROM auth_providers WHERE enabled = 1 ORDER BY sortOrder ASC`)
+	out.Body.Data = []EnabledProviderView{}
+	rows, err := h.DB.QueryContext(ctx,
+		`SELECT id, name, displayName, type, icon FROM auth_providers
+		 WHERE enabled = 1 ORDER BY sortOrder ASC`)
+	if err != nil {
+		return nil, apperr.Internal("list providers: " + err.Error())
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var v EnabledProviderView
+		if err := rows.Scan(&v.ID, &v.Name, &v.DisplayName, &v.Type, &v.Icon); err != nil {
+			continue
+		}
+		v.AuthURL = "/api/auth/providers/" + v.Name + "/authorize"
+		out.Body.Data = append(out.Body.Data, v)
+	}
 	out.Body.Success = true
 	return out, nil
 }

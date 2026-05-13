@@ -40,16 +40,20 @@ import (
 )
 
 type File struct {
-	ID          string    `db:"id"          json:"id"`
-	Name        string    `db:"name"        json:"name"`
-	Description *string   `db:"description" json:"description"`
-	Extension   string    `db:"extension"   json:"extension"`
-	Size        dbtypes.BigIntStr `db:"size"        json:"size"`
-	ObjectName  string    `db:"objectName"  json:"objectName"`
-	UserID      string    `db:"userId"      json:"userId"`
-	FolderID    *string   `db:"folderId"    json:"folderId"`
-	CreatedAt   dbtypes.PrismaTime `db:"createdAt"   json:"createdAt"`
-	UpdatedAt   dbtypes.PrismaTime `db:"updatedAt"   json:"updatedAt"`
+	ID                 string             `db:"id"          json:"id"`
+	Name               string             `db:"name"        json:"name"`
+	Description        *string            `db:"description" json:"description"`
+	Extension          string             `db:"extension"   json:"extension"`
+	Size               dbtypes.BigIntStr  `db:"size"        json:"size"`
+	ObjectName         string             `db:"objectName"  json:"objectName"`
+	// UserID is server-internal — never serialised. /files endpoints are
+	// owner-only, so the value would always equal the caller's own ID
+	// (redundant payload), and the frontend has no consumer that reads
+	// `file.userId`.
+	UserID    string             `db:"userId"      json:"-"`
+	FolderID  *string            `db:"folderId"    json:"folderId"`
+	CreatedAt dbtypes.PrismaTime `db:"createdAt"   json:"createdAt"`
+	UpdatedAt dbtypes.PrismaTime `db:"updatedAt"   json:"updatedAt"`
 }
 
 type Handler struct {

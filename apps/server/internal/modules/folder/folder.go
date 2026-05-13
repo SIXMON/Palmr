@@ -26,14 +26,17 @@ import (
 // subfolders here. The UI shows a "—" when the field is missing, but with
 // it populated callers see proper KB/MB/GB numbers.
 type Folder struct {
-	ID          string             `db:"id"          json:"id"`
-	Name        string             `db:"name"        json:"name"`
-	Description *string            `db:"description" json:"description"`
-	ObjectName  string             `db:"objectName"  json:"objectName"`
-	ParentID    *string            `db:"parentId"    json:"parentId"`
-	UserID      string             `db:"userId"      json:"userId"`
-	CreatedAt   dbtypes.PrismaTime `db:"createdAt"   json:"createdAt"`
-	UpdatedAt   dbtypes.PrismaTime `db:"updatedAt"   json:"updatedAt"`
+	ID          string  `db:"id"          json:"id"`
+	Name        string  `db:"name"        json:"name"`
+	Description *string `db:"description" json:"description"`
+	ObjectName  string  `db:"objectName"  json:"objectName"`
+	ParentID    *string `db:"parentId"    json:"parentId"`
+	// UserID is server-internal — /folders is owner-only so the value
+	// would always equal the caller. Hidden from the JSON envelope; the
+	// DB struct still loads it for in-handler ownership checks.
+	UserID    string             `db:"userId"      json:"-"`
+	CreatedAt dbtypes.PrismaTime `db:"createdAt"   json:"createdAt"`
+	UpdatedAt dbtypes.PrismaTime `db:"updatedAt"   json:"updatedAt"`
 
 	TotalSize *dbtypes.BigIntStr `db:"-" json:"totalSize,omitempty"`
 	Count     *FolderCount       `db:"-" json:"_count,omitempty"`

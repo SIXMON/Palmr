@@ -133,12 +133,37 @@ type ConfigsOutput struct {
 	}
 }
 
+// sensitiveKeys are configuration values that must never be sent to the
+// browser even on the admin endpoint. The same list also blocks
+// UpdateConfig / BulkUpdateConfigs — some of these are sourced from env
+// vars (jwtSecret) and the DB row is vestigial; rewriting it from the
+// UI would be confusing at best.
 var sensitiveKeys = map[string]bool{
-	"smtpPass":             true,
-	"smtpAuth":             true,
-	"smtpEnabled":          false, // public flag IS exposed
-	"jwtSecret":            true,
-	"oidcClientSecret":     true,
+	"smtpPass":         true,
+	"smtpAuth":         true,
+	"jwtSecret":        true,
+	"oidcClientSecret": true,
+}
+
+// publicConfigKeys is the *allowlist* of config keys served to
+// anonymous visitors via /app/configs/public. The login page reads
+// `passwordAuthEnabled`, the home page reads `showHomePage`, etc.
+//
+// We use an allowlist (not a denylist) because the previous denylist
+// silently leaked any newly seeded config that wasn't explicitly tagged
+// sensitive — most notably `smtpUser`, which is a real email address
+// in most deployments and would otherwise reach any unauthenticated
+// visitor.
+var publicConfigKeys = map[string]bool{
+	"appName":              true,
+	"appLogo":              true,
+	"appDescription":       true,
+	"showHomePage":         true,
+	"hideVersion":          true,
+	"firstUserAccess":      true,
+	"smtpEnabled":          true,
+	"passwordAuthEnabled":  true,
+	"authProvidersEnabled": true,
 }
 
 func (h *Handler) GetPublicConfigs(ctx context.Context, _ *struct{}) (*ConfigsOutput, error) {
@@ -157,7 +182,7 @@ func (h *Handler) GetPublicConfigs(ctx context.Context, _ *struct{}) (*ConfigsOu
 		if err := rows.Scan(&c.Key, &c.Value, &c.Type, &c.Group, &c.UpdatedAt); err != nil {
 			return nil, apperr.Internal("scan config: " + err.Error())
 		}
-		if sensitiveKeys[c.Key] {
+		if !publicConfigKeys[c.Key] {
 			continue
 		}
 		out.Body.Configs = append(out.Body.Configs, c)

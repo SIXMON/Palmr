@@ -20,9 +20,4 @@ export interface RegisterWithInviteRequest {
 
 export interface RegisterWithInviteResponse {
   message: string;
-  user: {
-    id: string;
-    username: string;
-    email: string;
-  };
 }

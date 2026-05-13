@@ -485,9 +485,15 @@ type RSAliasInput struct {
 		Alias *string `json:"alias,omitempty"`
 	}
 }
+// RSAliasBody matches the frontend `ReverseShareAlias` type — 5 fields.
+// Earlier this only carried {alias, reverseShareId}; the missing id /
+// createdAt / updatedAt left consumers reading undefined.
 type RSAliasBody struct {
+	ID             string `json:"id"`
 	Alias          string `json:"alias"`
 	ReverseShareID string `json:"reverseShareId"`
+	CreatedAt      string `json:"createdAt"`
+	UpdatedAt      string `json:"updatedAt"`
 }
 type RSAliasOutput struct {
 	Body struct {
@@ -514,16 +520,23 @@ func (h *Handler) CreateAlias(ctx context.Context, in *RSAliasInput) (*RSAliasOu
 		_, _ = rand.Read(b)
 		alias = hex.EncodeToString(b)
 	}
+	id := uuid.NewString()
 	now := time.Now().UTC()
 	_, err = h.DB.ExecContext(ctx,
 		`INSERT INTO reverse_share_aliases (id, alias, reverseShareId, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?)`,
-		uuid.NewString(), alias, in.ReverseShareID, now, now)
+		id, alias, in.ReverseShareID, now, now)
 	if err != nil {
 		return nil, apperr.Conflict("alias already exists")
 	}
+	stamp := now.Format(time.RFC3339)
 	out := &RSAliasOutput{}
-	out.Body.Alias.Alias = alias
-	out.Body.Alias.ReverseShareID = in.ReverseShareID
+	out.Body.Alias = RSAliasBody{
+		ID:             id,
+		Alias:          alias,
+		ReverseShareID: in.ReverseShareID,
+		CreatedAt:      stamp,
+		UpdatedAt:      stamp,
+	}
 	return out, nil
 }
 

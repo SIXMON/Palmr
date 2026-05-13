@@ -15,7 +15,10 @@ export interface ShareFile {
   extension: string;
   size: string;
   objectName: string;
-  userId: string;
+  // Owner-only — the public alias endpoint strips this to avoid
+  // leaking the creator's userId to anonymous visitors (who could
+  // otherwise enumerate the user's other shares).
+  userId?: string;
   folderId: string | null;
   createdAt: string;
   updatedAt: string;
@@ -55,7 +58,9 @@ export interface Share {
   views: number;
   createdAt: string;
   updatedAt: string;
-  creatorId: string;
+  // Owner-only — the public alias endpoint drops this so anonymous
+  // visitors can't pivot from a single alias to the user's other shares.
+  creatorId?: string;
   security: ShareSecurity;
   files: ShareFile[];
   folders: ShareFolder[];

@@ -7,7 +7,6 @@ export interface FileItem {
   extension: string;
   size: string;
   objectName: string;
-  userId: string;
   folderId: string | null;
   createdAt: string;
   updatedAt: string;

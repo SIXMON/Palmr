@@ -24,6 +24,9 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -503,11 +506,29 @@ func (h *Handler) Authorize(w http.ResponseWriter, r *http.Request) {
 
 	conf, ctx := h.oauth2Config(r.Context(), p)
 	_ = ctx
+	// Auto-set the callback URL when the provider row doesn't carry one.
+	// Required by spec-strict IdPs (defguard, Cognito with policy, …);
+	// the same value MUST be replayed at token exchange in Callback.
+	conf.RedirectURL = h.effectiveRedirectURI(r, name, p)
 	url := conf.AuthCodeURL(stateID,
 		oauth2.AccessTypeOnline,
 		oauth2.SetAuthURLParam("code_challenge", challenge),
 		oauth2.SetAuthURLParam("code_challenge_method", "S256"))
 	http.Redirect(w, r, url, http.StatusFound)
+}
+
+// effectiveRedirectURI returns the OAuth callback URL to advertise to
+// the IdP. Admin-configured `redirectUri` wins (override path); the
+// default is reconstructed from the current request — public scheme +
+// host from forwarded headers + the chi route for /callback.
+//
+// Resolving from the request rather than baking it at install lets
+// Palmr work behind any reverse proxy hostname without a config edit.
+func (h *Handler) effectiveRedirectURI(r *http.Request, providerName string, p Provider) string {
+	if p.RedirectURI != nil && *p.RedirectURI != "" {
+		return *p.RedirectURI
+	}
+	return h.frontendURL(r) + "/api/auth/providers/" + providerName + "/callback"
 }
 
 func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
@@ -535,6 +556,12 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	conf, ctx := h.oauth2Config(r.Context(), p)
+	// Replay the exact redirect_uri sent on the authorize step — the
+	// OAuth2 spec requires the IdP to verify it matches. With a nil
+	// `p.RedirectURI` both sides resolve through effectiveRedirectURI()
+	// so the host/scheme is consistent (assuming the proxy didn't
+	// swap behind our back between the two hops).
+	conf.RedirectURL = h.effectiveRedirectURI(r, name, p)
 	tok, err := conf.Exchange(ctx, code, oauth2.SetAuthURLParam("code_verifier", st.CodeVerifier))
 	if err != nil {
 		apperr.WriteJSON(w, http.StatusBadGateway, "token exchange: "+err.Error())
@@ -582,57 +609,131 @@ func (h *Handler) oauth2Config(ctx context.Context, p Provider) (*oauth2.Config,
 		ClientSecret: deref(p.ClientSecret),
 		RedirectURL:  deref(p.RedirectURI),
 		Scopes:       scopes,
-		Endpoint: oauth2.Endpoint{
-			AuthURL:  deref(p.AuthorizationEndpoint),
-			TokenURL: deref(p.TokenEndpoint),
-		},
 	}
-	// If we have an issuer URL we can let go-oidc discover endpoints
-	// (this overrides the manual auth/token URLs).
-	if p.IssuerURL != nil && *p.IssuerURL != "" {
-		if prov, err := oidc.NewProvider(ctx, *p.IssuerURL); err == nil {
+
+	issuer := strings.TrimRight(deref(p.IssuerURL), "/")
+
+	// Prefer OIDC discovery — one round-trip and the IdP can rev its
+	// endpoint URLs without an admin edit on our side.
+	if issuer != "" {
+		if prov, err := oidc.NewProvider(ctx, issuer); err == nil {
 			conf.Endpoint = prov.Endpoint()
+			return conf, ctx
 		}
+		// Discovery failed (network error, missing /.well-known/
+		// openid-configuration, non-OIDC IdP, …). Fall through to the
+		// admin-configured manual endpoints — but resolve them against
+		// the issuer URL so a relative path like `/oauth/authorize`
+		// still ends up at the IdP. Without this fallback the browser
+		// would resolve "/oauth/authorize" against the Palmr origin
+		// itself and 404 immediately.
+	}
+
+	conf.Endpoint = oauth2.Endpoint{
+		AuthURL:  resolveAgainstIssuer(issuer, deref(p.AuthorizationEndpoint)),
+		TokenURL: resolveAgainstIssuer(issuer, deref(p.TokenEndpoint)),
 	}
 	return conf, ctx
 }
 
+// resolveAgainstIssuer prefixes a relative endpoint path with the
+// issuer URL. Absolute URLs and empty strings pass through unchanged.
+// Used for the rare case where OIDC discovery fails or the admin
+// configured a non-OIDC provider with manual endpoint paths.
+func resolveAgainstIssuer(issuer, endpoint string) string {
+	if endpoint == "" || strings.HasPrefix(endpoint, "http://") || strings.HasPrefix(endpoint, "https://") {
+		return endpoint
+	}
+	if issuer == "" {
+		return endpoint
+	}
+	if !strings.HasPrefix(endpoint, "/") {
+		endpoint = "/" + endpoint
+	}
+	return issuer + endpoint
+}
+
 func (h *Handler) fetchIdentity(ctx context.Context, p Provider, tok *oauth2.Token) (email, sub string, err error) {
-	if p.IssuerURL != nil && *p.IssuerURL != "" {
-		prov, err := oidc.NewProvider(ctx, *p.IssuerURL)
-		if err != nil {
-			return "", "", err
-		}
-		rawID, ok := tok.Extra("id_token").(string)
-		if ok && rawID != "" {
-			verifier := prov.Verifier(&oidc.Config{ClientID: deref(p.ClientID)})
-			idTok, err := verifier.Verify(ctx, rawID)
+	issuer := strings.TrimRight(deref(p.IssuerURL), "/")
+
+	// Prefer OIDC discovery — id-token verification + userinfo come
+	// for free. Falls through to the manual /userinfo path if the IdP
+	// doesn't expose /.well-known/openid-configuration at the
+	// configured issuer URL.
+	if issuer != "" {
+		if prov, err := oidc.NewProvider(ctx, issuer); err == nil {
+			rawID, ok := tok.Extra("id_token").(string)
+			if ok && rawID != "" {
+				verifier := prov.Verifier(&oidc.Config{ClientID: deref(p.ClientID)})
+				if idTok, err := verifier.Verify(ctx, rawID); err == nil {
+					var c struct {
+						Email   string `json:"email"`
+						Subject string `json:"sub"`
+					}
+					if err := idTok.Claims(&c); err == nil && c.Email != "" {
+						return strings.ToLower(c.Email), c.Subject, nil
+					}
+				}
+			}
+			ui, err := prov.UserInfo(ctx, oauth2.StaticTokenSource(tok))
 			if err == nil {
 				var c struct {
 					Email   string `json:"email"`
 					Subject string `json:"sub"`
 				}
-				if err := idTok.Claims(&c); err == nil && c.Email != "" {
+				if err := ui.Claims(&c); err == nil {
 					return strings.ToLower(c.Email), c.Subject, nil
 				}
 			}
 		}
-		// Fall through to userinfo
-		ui, err := prov.UserInfo(ctx, oauth2.StaticTokenSource(tok))
-		if err != nil {
-			return "", "", err
-		}
-		var c struct {
-			Email   string `json:"email"`
-			Subject string `json:"sub"`
-		}
-		if err := ui.Claims(&c); err != nil {
-			return "", "", err
-		}
-		return strings.ToLower(c.Email), c.Subject, nil
 	}
-	// Plain OAuth2 (no OIDC) — hit userInfoEndpoint manually.
-	return "", "", apperr.BadRequest("non-OIDC providers not yet supported")
+
+	// Manual userinfo fallback. Used when:
+	//   * No issuerUrl is configured (plain OAuth2 provider), or
+	//   * Discovery against the issuer URL failed (404, wrong path,
+	//     etc.) — in which case the admin probably configured
+	//     userInfoEndpoint manually to compensate.
+	return h.fetchIdentityManual(ctx, p, tok)
+}
+
+// fetchIdentityManual hits the admin-configured userInfoEndpoint with
+// the access token and pulls the standard `email` and `sub` claims out
+// of the JSON response. Path-relative endpoints are resolved against
+// the issuer URL.
+func (h *Handler) fetchIdentityManual(ctx context.Context, p Provider, tok *oauth2.Token) (email, sub string, err error) {
+	issuer := strings.TrimRight(deref(p.IssuerURL), "/")
+	uiURL := resolveAgainstIssuer(issuer, deref(p.UserInfoEndpoint))
+	if uiURL == "" {
+		return "", "", apperr.BadRequest("provider has no userInfoEndpoint configured")
+	}
+	if !strings.HasPrefix(uiURL, "http://") && !strings.HasPrefix(uiURL, "https://") {
+		return "", "", apperr.BadRequest("userInfoEndpoint is relative but no issuerUrl is set to resolve it")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, uiURL, nil)
+	if err != nil {
+		return "", "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+tok.AccessToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return "", "", fmt.Errorf("userinfo %d: %s", resp.StatusCode, string(body))
+	}
+	var c struct {
+		Email   string `json:"email"`
+		Subject string `json:"sub"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&c); err != nil {
+		return "", "", err
+	}
+	if c.Email == "" {
+		return "", "", fmt.Errorf("userinfo response missing email claim")
+	}
+	return strings.ToLower(c.Email), c.Subject, nil
 }
 
 func (h *Handler) linkOrCreate(ctx context.Context, p Provider, email, sub string) (string, bool, error) {

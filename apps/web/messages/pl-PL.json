@@ -1905,7 +1905,8 @@
       "active": "Aktywny",
       "inactive": "Nieaktywny",
       "admin": "Administrator",
-      "userr": "Użytkownik"
+      "userr": "Użytkownik",
+      "storageUsed": "Wykorzystane miejsce"
     },
     "invite": {
       "button": "Wygeneruj link zaproszenia",

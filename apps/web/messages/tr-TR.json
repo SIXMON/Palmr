@@ -1905,7 +1905,8 @@
       "active": "Etkin",
       "inactive": "Devre Dışı",
       "admin": "Yönetici",
-      "userr": "Kullanıcı"
+      "userr": "Kullanıcı",
+      "storageUsed": "Kullanılan depolama"
     },
     "invite": {
       "button": "Davet Bağlantısı Oluştur",

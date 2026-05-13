@@ -15,16 +15,8 @@ import { SharesTableContainer } from "./components/shares-table-container";
 import { useShares } from "./hooks/use-shares";
 
 export default function SharesPage() {
-  const {
-    shares,
-    isLoading,
-    searchQuery,
-    setSearchQuery,
-    filteredShares,
-    handleCopyLink,
-    loadShares,
-    smtpEnabled,
-  } = useShares();
+  const { shares, isLoading, searchQuery, setSearchQuery, filteredShares, handleCopyLink, loadShares, smtpEnabled } =
+    useShares();
 
   const { isOpen: isCreateModalOpen, onOpen: onOpenCreateModal, onClose: onCloseCreateModal } = useDisclosure();
   const shareManager = useShareManager(loadShares);

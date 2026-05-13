@@ -1909,7 +1909,8 @@
       "active": "Ativo",
       "inactive": "Inativo",
       "admin": "Administrador",
-      "userr": "Usuário"
+      "userr": "Usuário",
+      "storageUsed": "Armazenamento utilizado"
     },
     "invite": {
       "button": "Gerar Link de Convite",

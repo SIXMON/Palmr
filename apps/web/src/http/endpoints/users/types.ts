@@ -11,6 +11,11 @@ export interface User {
   isActive: boolean;
   createdAt: string;
   updatedAt: string;
+  // Total bytes of `files.size` owned by this user. Only emitted by
+  // the admin GET /users endpoint; the per-user GET /users/{id} and
+  // avatar endpoints leave it out (server-side `omitempty`).
+  // String because BigInt-ish int64 over JSON.
+  storageUsed?: string;
 }
 
 export interface UserWithMessageResponse {

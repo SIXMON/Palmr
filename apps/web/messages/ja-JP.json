@@ -1905,7 +1905,8 @@
       "active": "アクティブ",
       "inactive": "非アクティブ",
       "admin": "管理者",
-      "userr": "ユーザー"
+      "userr": "ユーザー",
+      "storageUsed": "使用容量"
     },
     "invite": {
       "button": "招待リンクを生成",

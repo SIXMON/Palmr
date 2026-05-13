@@ -1909,7 +1909,8 @@
       "active": "فعال",
       "inactive": "غیرفعال",
       "admin": "مدیر",
-      "userr": "کاربر"
+      "userr": "کاربر",
+      "storageUsed": "فضای استفاده‌شده"
     },
     "invite": {
       "button": "تولید لینک دعوت",

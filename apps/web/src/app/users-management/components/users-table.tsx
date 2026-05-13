@@ -3,6 +3,7 @@ import { useTranslations } from "next-intl";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { formatFileSize } from "@/utils/format-file-size";
 import { UsersTableProps } from "../types";
 import { UserActionsDropdown } from "./user-actions-dropdown";
 
@@ -26,6 +27,9 @@ export function UsersTable({ users, currentUser, onEdit, onDelete, onToggleStatu
             </TableHead>
             <TableHead className="h-10 text-xs font-bold text-muted-foreground bg-muted/50 px-4">
               {t("users.table.role")}
+            </TableHead>
+            <TableHead className="h-10 text-xs font-bold text-muted-foreground bg-muted/50 px-4">
+              {t("users.table.storageUsed")}
             </TableHead>
             <TableHead className="h-10 w-[70px] text-xs font-bold text-muted-foreground bg-muted/50 px-4">
               {t("users.table.actions")}
@@ -59,6 +63,9 @@ export function UsersTable({ users, currentUser, onEdit, onDelete, onToggleStatu
                 <Badge variant={user.isAdmin ? "destructive" : "secondary"}>
                   {user.isAdmin ? t("users.table.admin") : t("users.table.userr")}
                 </Badge>
+              </TableCell>
+              <TableCell className="h-12 px-4 text-sm tabular-nums text-muted-foreground">
+                {user.storageUsed !== undefined ? formatFileSize(Number(user.storageUsed)) : "—"}
               </TableCell>
               <TableCell className="h-12 px-4">
                 <UserActionsDropdown

@@ -14,6 +14,10 @@ export interface BaseUser {
 
 export interface User extends BaseUser {
   image: string | null;
+  // Only populated by the admin `GET /users` listing — backend omits
+  // it from `/auth/me`, `/users/{id}`, and avatar endpoints. String
+  // because BigInt-ish int64 over JSON.
+  storageUsed?: string;
 }
 
 export type LoginUser = BaseUser;

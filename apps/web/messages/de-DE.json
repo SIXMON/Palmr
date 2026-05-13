@@ -1905,7 +1905,8 @@
       "active": "Aktiv",
       "inactive": "Inaktiv",
       "admin": "Administrator",
-      "userr": "Benutzer"
+      "userr": "Benutzer",
+      "storageUsed": "Verwendeter Speicher"
     },
     "invite": {
       "button": "Einladungslink generieren",

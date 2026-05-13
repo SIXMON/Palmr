@@ -33,16 +33,22 @@ import (
 )
 
 type User struct {
-	ID        string    `db:"id"        json:"id"`
-	FirstName string    `db:"firstName" json:"firstName"`
-	LastName  string    `db:"lastName"  json:"lastName"`
-	Username  string    `db:"username"  json:"username"`
-	Email     string    `db:"email"     json:"email"`
-	Image     *string   `db:"image"     json:"image"`
-	IsAdmin   bool      `db:"isAdmin"   json:"isAdmin"`
-	IsActive  bool      `db:"isActive"  json:"isActive"`
+	ID        string             `db:"id"        json:"id"`
+	FirstName string             `db:"firstName" json:"firstName"`
+	LastName  string             `db:"lastName"  json:"lastName"`
+	Username  string             `db:"username"  json:"username"`
+	Email     string             `db:"email"     json:"email"`
+	Image     *string            `db:"image"     json:"image"`
+	IsAdmin   bool               `db:"isAdmin"   json:"isAdmin"`
+	IsActive  bool               `db:"isActive"  json:"isActive"`
 	CreatedAt dbtypes.PrismaTime `db:"createdAt" json:"createdAt"`
 	UpdatedAt dbtypes.PrismaTime `db:"updatedAt" json:"updatedAt"`
+
+	// StorageUsed is the sum of `files.size` for this user (in bytes).
+	// Only populated by the admin list endpoint (`GET /users`); other
+	// endpoints leave it as the zero value so the field is omitted
+	// from the response.
+	StorageUsed *dbtypes.BigIntStr `db:"storageUsed" json:"storageUsed,omitempty"`
 }
 
 type Handler struct {
@@ -202,8 +208,15 @@ func (h *Handler) List(ctx context.Context, _ *struct{}) (*UserListOutput, error
 		return nil, apperr.Forbidden(err.Error())
 	}
 	out := &UserListOutput{Body: []User{}}
+	// Correlated subselect to compute storage usage per user in a
+	// single query — cheaper than N+1 follow-up SUMs from the
+	// frontend. Index on files.userId already exists (migration 0002),
+	// so each subselect is an index range scan.
 	if err := h.DB.SelectContext(ctx, &out.Body,
-		`SELECT id, firstName, lastName, username, email, image, isAdmin, isActive, createdAt, updatedAt
+		`SELECT
+		   id, firstName, lastName, username, email, image, isAdmin, isActive,
+		   createdAt, updatedAt,
+		   (SELECT COALESCE(SUM(size), 0) FROM files WHERE files.userId = users.id) AS storageUsed
 		 FROM users ORDER BY createdAt DESC`); err != nil {
 		return nil, apperr.Internal("list users")
 	}

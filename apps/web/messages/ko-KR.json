@@ -1905,7 +1905,8 @@
       "active": "활성",
       "inactive": "비활성",
       "admin": "관리자",
-      "userr": "사용자"
+      "userr": "사용자",
+      "storageUsed": "사용된 저장 공간"
     },
     "invite": {
       "button": "초대 링크 생성",

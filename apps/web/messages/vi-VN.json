@@ -1909,7 +1909,8 @@
       "active": "Đang hoạt động",
       "inactive": "Không hoạt động",
       "admin": "Quản trị viên",
-      "userr": "Người dùng"
+      "userr": "Người dùng",
+      "storageUsed": "Dung lượng đã dùng"
     },
     "invite": {
       "button": "Tạo liên kết mời",

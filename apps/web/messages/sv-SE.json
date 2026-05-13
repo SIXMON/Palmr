@@ -1909,7 +1909,8 @@
       "active": "Aktiv",
       "inactive": "Inaktiv",
       "admin": "Administration",
-      "userr": "Användare"
+      "userr": "Användare",
+      "storageUsed": "Använt lagringsutrymme"
     },
     "invite": {
       "button": "Generera inbjudningslänk",

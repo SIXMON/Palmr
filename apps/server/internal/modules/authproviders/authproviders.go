@@ -558,6 +558,16 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 		apperr.WriteJSON(w, http.StatusBadRequest, "invalid state")
 		return
 	}
+	// SECURITY: enforce the state expiry inline rather than leaning
+	// on the 5-minute GC ticker. Otherwise a captured state value
+	// stays replayable for up to one GC cycle (~5 min) after the
+	// authorize step, which is much longer than the ~30-60s an OAuth
+	// flow takes in practice. The 10-minute window matches gcState's
+	// cutoff and covers slow human MFA prompts.
+	if time.Since(st.CreatedAt) > 10*time.Minute {
+		apperr.WriteJSON(w, http.StatusBadRequest, "state expired; restart the login flow")
+		return
+	}
 
 	p, err := h.loadByName(r.Context(), name)
 	if err != nil || !p.Enabled {

@@ -153,6 +153,10 @@ type InviteRegisterOutput struct {
 }
 
 func (h *Handler) RegisterWithInvite(ctx context.Context, in *InviteRegisterInput) (*InviteRegisterOutput, error) {
+	// Cheap pre-check so we can return the nicer "invite not found" /
+	// "already used" / "expired" message when the obvious thing is
+	// wrong. NOT the authoritative gate — the CAS UPDATE inside the
+	// transaction below is what actually claims the token.
 	var t Token
 	if err := h.DB.GetContext(ctx, &t, `SELECT token, expiresAt, usedAt, createdBy FROM invite_tokens WHERE token = ?`, in.Body.Token); err != nil {
 		return nil, apperr.NotFound("invite not found")
@@ -174,16 +178,36 @@ func (h *Handler) RegisterWithInvite(ctx context.Context, in *InviteRegisterInpu
 		return nil, apperr.Internal("begin")
 	}
 	defer tx.Rollback()
+
+	// SECURITY (L5): claim the token via a conditional UPDATE so two
+	// concurrent registrations on the same invite can't both succeed.
+	// The pre-check above is racy (SELECT happens outside the tx), so
+	// without this CAS one invite could create two users — the second
+	// would fall through to the user-INSERT below and either succeed
+	// (different email/username) or 409 (same), but in neither case
+	// is that what an invite is meant to do.
+	res, err := tx.ExecContext(ctx,
+		`UPDATE invite_tokens SET usedAt = ?, updatedAt = ?
+		 WHERE token = ? AND usedAt IS NULL AND expiresAt > ?`,
+		now, now, in.Body.Token, now)
+	if err != nil {
+		return nil, apperr.Internal("claim invite: " + err.Error())
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		// Lost the race or the token just expired between pre-check
+		// and CAS. Either way it's no longer usable.
+		return nil, apperr.Conflict("invite already used or expired")
+	}
+
 	uid := uuid.NewString()
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO users (id, firstName, lastName, username, email, password, isAdmin, isActive, createdAt, updatedAt, twoFactorEnabled, twoFactorVerified)
 		VALUES (?, ?, ?, ?, ?, ?, 0, 1, ?, ?, 0, 0)`,
 		uid, in.Body.FirstName, in.Body.LastName, in.Body.Username, email, hash, now, now)
 	if err != nil {
+		// Tx rollback will un-claim the token so the next legitimate
+		// attempt with this invite can still go through.
 		return nil, apperr.Conflict("email or username already exists")
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE invite_tokens SET usedAt = ?, updatedAt = ? WHERE token = ?`, now, now, t.Token); err != nil {
-		return nil, apperr.Internal("mark token used")
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, apperr.Internal("commit")

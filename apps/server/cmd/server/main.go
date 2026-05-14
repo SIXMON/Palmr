@@ -129,7 +129,11 @@ func run() error {
 		SecureSite: cfg.SecureSite, CookieTTL: cfg.JWTTTL(),
 	})
 	// Share + reverse-share have public endpoints (alias views).
-	shareHandler := &share.Handler{DB: conn}
+	// share.New initialises the in-memory throttle used by GetByAlias
+	// to rate-limit share-password attempts (M1). A bare
+	// &share.Handler{} literal still works (lazy-init on first
+	// failure) but the constructor is the documented path.
+	shareHandler := share.New(conn)
 	share.Register(api, shareHandler)
 
 	rsHandler := &reverseshare.Handler{DB: conn, S3: s3client}
@@ -263,6 +267,17 @@ func authOptional(mw *auth.Middleware) func(http.Handler) http.Handler {
 func corsMiddleware(allow []string) func(http.Handler) http.Handler {
 	set := map[string]bool{}
 	for _, o := range allow {
+		// SECURITY (L6): a bare "*" combined with the
+		// `Access-Control-Allow-Credentials: true` header below is
+		// rejected by browsers anyway, but more importantly it's
+		// almost never what the operator actually wants — they
+		// either meant "any subdomain" (which still has to be
+		// enumerated) or got the env-var wrong. Refuse to register
+		// the wildcard so a misconfigured deploy fails closed
+		// instead of silently shipping a broken header.
+		if o == "*" {
+			continue
+		}
 		set[o] = true
 	}
 	return func(next http.Handler) http.Handler {

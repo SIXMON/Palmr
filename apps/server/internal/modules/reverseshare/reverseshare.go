@@ -33,8 +33,10 @@ import (
 	dbtypes "github.com/sixmon/palmr/apps/server/internal/db"
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1014,9 +1016,60 @@ func (h *Handler) MultipartComplete(ctx context.Context, in *MpCompleteInput) (*
 	if err != nil {
 		return nil, apperr.Internal("complete multipart: " + err.Error())
 	}
+	// SECURITY (L4): the reverse share advertises rs.MaxFileSize and
+	// the global maxFileSize at presign time, but a multipart caller
+	// can stream past whatever they claimed. HEAD the object now and
+	// drop it if the real size violates either limit. Same delete-on-
+	// reject pattern as file.MultipartComplete — refusal alone would
+	// leave the oversized object sitting in the bucket.
+	if err := h.enforceMultipartSize(ctx, id, in.Body.ObjectName); err != nil {
+		return nil, err
+	}
 	out := &RSMsgOutput{}
 	out.Body.Message = "ok"
 	return out, nil
+}
+
+// enforceMultipartSize compares the just-completed object's true size
+// against both rs.maxFileSize (per-reverse-share) and the global
+// maxFileSize (app_configs). Oversized objects are deleted before we
+// return the error so the bucket can't accumulate junk from rejected
+// uploads.
+func (h *Handler) enforceMultipartSize(ctx context.Context, reverseShareID, objectName string) error {
+	head, err := h.S3.Client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(h.S3.Bucket),
+		Key:    aws.String(objectName),
+	})
+	if err != nil {
+		_, _ = h.S3.Client.DeleteObject(ctx, &s3.DeleteObjectInput{
+			Bucket: aws.String(h.S3.Bucket),
+			Key:    aws.String(objectName),
+		})
+		return apperr.Internal("verify upload size: " + err.Error())
+	}
+	size := aws.ToInt64(head.ContentLength)
+
+	var perShare sql.NullInt64
+	_ = h.DB.QueryRowContext(ctx,
+		`SELECT maxFileSize FROM reverse_shares WHERE id = ?`, reverseShareID).Scan(&perShare)
+	if perShare.Valid && perShare.Int64 > 0 && size > perShare.Int64 {
+		_, _ = h.S3.Client.DeleteObject(ctx, &s3.DeleteObjectInput{
+			Bucket: aws.String(h.S3.Bucket),
+			Key:    aws.String(objectName),
+		})
+		return apperr.BadRequest("uploaded file exceeds this reverse share's file size limit")
+	}
+
+	var globalRaw string
+	_ = h.DB.GetContext(ctx, &globalRaw, `SELECT value FROM app_configs WHERE key = 'maxFileSize'`)
+	if global, err := strconv.ParseInt(globalRaw, 10, 64); err == nil && global > 0 && size > global {
+		_, _ = h.S3.Client.DeleteObject(ctx, &s3.DeleteObjectInput{
+			Bucket: aws.String(h.S3.Bucket),
+			Key:    aws.String(objectName),
+		})
+		return apperr.BadRequest("uploaded file exceeds the global maxFileSize limit")
+	}
+	return nil
 }
 
 type MpAbortInput struct {

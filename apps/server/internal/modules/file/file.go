@@ -24,6 +24,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -602,9 +603,77 @@ func (h *Handler) MultipartComplete(ctx context.Context, in *MultipartCompleteIn
 	if err != nil {
 		return nil, apperr.Internal("complete multipart: " + err.Error())
 	}
+	// SECURITY (L4): the multipart presigned-URL flow never sees the
+	// final size — each UploadPart call presents whatever bytes it
+	// likes against its slot, and the only authoritative size we can
+	// trust is what S3 reports after Complete. Enforce maxFileSize
+	// here so a caller can't sidestep the limit by claiming a small
+	// part-size at presign then streaming much more on the wire.
+	if err := h.enforceMultipartSize(ctx, uc.UserID, in.Body.ObjectName); err != nil {
+		return nil, err
+	}
 	out := &FileMsgOutput{}
 	out.Body.Message = "ok"
 	return out, nil
+}
+
+// enforceMultipartSize HEADs the just-completed object and rejects
+// (with DeleteObject as cleanup) when it exceeds maxFileSize from
+// app_configs or pushes the user past maxTotalStoragePerUser. Both
+// configs are read each call so admins can re-tune without restart.
+//
+// We delete the object on rejection rather than leaving it orphaned —
+// otherwise a malicious caller could fill the bucket by repeatedly
+// completing oversized uploads, knowing the failure surface won't
+// clean up after itself.
+func (h *Handler) enforceMultipartSize(ctx context.Context, userID, objectName string) error {
+	head, err := h.S3.Client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(h.S3.Bucket),
+		Key:    aws.String(objectName),
+	})
+	if err != nil {
+		// Couldn't determine size — safer to delete and refuse than to
+		// keep an unknown-size object on disk.
+		_, _ = h.S3.Client.DeleteObject(ctx, &s3.DeleteObjectInput{
+			Bucket: aws.String(h.S3.Bucket),
+			Key:    aws.String(objectName),
+		})
+		return apperr.Internal("verify upload size: " + err.Error())
+	}
+	size := aws.ToInt64(head.ContentLength)
+	maxFile := readInt64Config(ctx, h.DB, "maxFileSize")
+	if maxFile > 0 && size > maxFile {
+		_, _ = h.S3.Client.DeleteObject(ctx, &s3.DeleteObjectInput{
+			Bucket: aws.String(h.S3.Bucket),
+			Key:    aws.String(objectName),
+		})
+		return apperr.BadRequest("uploaded file exceeds maxFileSize")
+	}
+	quota := readInt64Config(ctx, h.DB, "maxTotalStoragePerUser")
+	if quota > 0 {
+		var used int64
+		_ = h.DB.GetContext(ctx, &used,
+			`SELECT COALESCE(SUM(size), 0) FROM files WHERE userId = ?`, userID)
+		if used+size > quota {
+			_, _ = h.S3.Client.DeleteObject(ctx, &s3.DeleteObjectInput{
+				Bucket: aws.String(h.S3.Bucket),
+				Key:    aws.String(objectName),
+			})
+			return apperr.BadRequest("uploaded file would exceed your storage quota")
+		}
+	}
+	return nil
+}
+
+// readInt64Config pulls an int64-valued config out of app_configs.
+// Returns 0 (no limit) when the key is missing or unparseable.
+func readInt64Config(ctx context.Context, db *sqlx.DB, key string) int64 {
+	var raw string
+	if err := db.GetContext(ctx, &raw, `SELECT value FROM app_configs WHERE key = ?`, key); err != nil {
+		return 0
+	}
+	n, _ := strconv.ParseInt(raw, 10, 64)
+	return n
 }
 
 type MultipartAbortInput struct {

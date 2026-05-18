@@ -1427,6 +1427,10 @@
       "expires": "Expires: {date}"
     },
     "downloadAll": "Download All",
+    "copyCurl": "Copy curl command",
+    "copyCurlTooltip": "Paste the copied command into a terminal to download this share via curl or wget.",
+    "curlCopied": "curl command copied to clipboard",
+    "curlCopyFailed": "Could not copy the curl command",
     "notFound": {
       "title": "Share Not Found",
       "description": "This share may have been deleted or expired."

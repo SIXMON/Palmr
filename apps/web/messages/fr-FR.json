@@ -1385,6 +1385,10 @@
     },
     "pageTitle": "Partage",
     "downloadAll": "Tout Télécharger",
+    "copyCurl": "Copier la commande curl",
+    "copyCurlTooltip": "Collez la commande copiée dans un terminal pour télécharger ce partage via curl ou wget.",
+    "curlCopied": "Commande curl copiée dans le presse-papier",
+    "curlCopyFailed": "Impossible de copier la commande curl",
     "metadata": {
       "defaultDescription": "Partager des fichiers en toute sécurité",
       "filesShared": "{count, plural, =1 {1 fichier partagé} other {# fichiers partagés}}"

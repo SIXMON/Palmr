@@ -21,21 +21,31 @@ package share
 
 import (
 	dbtypes "github.com/sixmon/palmr/apps/server/internal/db"
+	"archive/zip"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
+	"io"
+	"log/slog"
 	"net/http"
+	"net/url"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 
 	"github.com/sixmon/palmr/apps/server/internal/auth"
 	apperr "github.com/sixmon/palmr/apps/server/internal/errors"
+	"github.com/sixmon/palmr/apps/server/internal/storage"
 )
 
 type Share struct {
@@ -84,6 +94,12 @@ type FolderSummary struct {
 
 type Handler struct {
 	DB *sqlx.DB
+	// S3 is optional — only the /shares/alias/{alias}/download
+	// endpoint needs it (to presign single-file URLs and to read
+	// objects for the multi-file zip stream). The legacy JSON
+	// endpoints work without it, so leaving it nil is OK for
+	// hosted-only deployments.
+	S3 *storage.S3
 
 	// pwThrottle rate-limits share-password attempts per shareID. We
 	// reuse maxLoginAttempts + loginBlockDuration from app_configs so
@@ -96,6 +112,14 @@ type Handler struct {
 	// behind CDN/CGNAT, and the realistic mitigation for that DoS is
 	// rate-limiting at the proxy.
 	pwThrottle *shareThrottle
+
+	// dlGate caps the number of in-flight downloads per share so a
+	// single share can't be used as a bandwidth-amplification target
+	// (M-DL1). Process-local; defaults to maxConcurrentDownloads. The
+	// authoritative DoS protection still belongs at the reverse proxy
+	// (limit_conn, fail2ban) — this is a backstop so one popular
+	// share can't starve all other shares.
+	dlGate *downloadGate
 }
 
 // New is what /cmd/server wires up. It exists so the throttle gets
@@ -103,8 +127,13 @@ type Handler struct {
 // struct literal would nil-panic on first attempt. Existing literals
 // that still set Handler{DB: ...} keep working because we lazy-init in
 // pwThrottleHandle, but New is the recommended path going forward.
-func New(db *sqlx.DB) *Handler {
-	return &Handler{DB: db, pwThrottle: newShareThrottle()}
+func New(db *sqlx.DB, s3 *storage.S3) *Handler {
+	return &Handler{
+		DB:         db,
+		S3:         s3,
+		pwThrottle: newShareThrottle(),
+		dlGate:     newDownloadGate(maxConcurrentDownloadsPerShare),
+	}
 }
 
 // shareThrottle is an in-memory sliding-window failure counter keyed
@@ -1229,4 +1258,542 @@ func (h *Handler) publicView(ctx context.Context, shareID string) (publicView, e
 		v.Alias = &av
 	}
 	return v, nil
+}
+
+// -----------------------------------------------------------------------------
+// Public download endpoint — `GET /shares/alias/{alias}/download`
+//
+// Designed for direct curl/wget access. nginx routes /s/{alias} to this
+// handler when the client doesn't ask for HTML (Accept header check),
+// so the same URL the user copy-pastes in the browser also works as
+// `curl -L -o out.zip https://palmr/s/<alias>`.
+//
+// Password handling, in priority order:
+//   1. `Authorization: Basic <base64(:password)>` — idiomatic curl
+//      (`-u :secret`). The username portion is ignored.
+//   2. `X-Share-Password: <password>` — what the SPA sends today.
+// `?password=` is intentionally NOT accepted: query strings end up in
+// proxy logs and browser history.
+//
+// Response shape:
+//   - Wrong/missing password → 401 + `WWW-Authenticate: Basic realm=...`
+//     so curl can re-prompt interactively and shell scripts can detect.
+//   - Single file & no folders → 302 to a presigned S3 URL. RustFS
+//     streams the bytes directly, zero backend bandwidth.
+//   - Multi-file or any folder → on-the-fly zip via archive/zip.
+//     Constant RAM; we read each S3 object into the zip writer's
+//     stream as it goes. Folder hierarchy is preserved with relative
+//     paths inside the archive.
+//
+// Throttling: shares the same per-shareID failure window as
+// GetByAlias (M1), so brute-force across this endpoint and the SPA
+// path is rate-limited as one bucket.
+// -----------------------------------------------------------------------------
+
+// RegisterPlain attaches the chi-native download endpoint. We can't
+// use huma here because the response is either a 302 redirect or a
+// streaming zip — neither fits huma's JSON-typed output model. Both
+// GET and HEAD are registered: some clients (wget --spider, some
+// backup tools) probe with HEAD before downloading.
+func (h *Handler) RegisterPlain(r chi.Router) {
+	r.Get("/shares/alias/{alias}/download", h.ServeDownload)
+	r.Head("/shares/alias/{alias}/download", h.ServeDownload)
+}
+
+// maxConcurrentDownloadsPerShare is the cap enforced by dlGate. Picked
+// to be high enough that legitimate prefetchers / mobile retries don't
+// trip it, low enough that one share can't sustain hundreds of
+// parallel S3 fetches.
+const maxConcurrentDownloadsPerShare = 8
+
+// maxFolderRecursionDepth caps how deep streamFolderIntoZip recurses.
+// Real shares rarely nest past ~5 levels; the bound is purely defensive
+// against malicious parent-chain construction that would blow the
+// Go stack.
+const maxFolderRecursionDepth = 64
+
+// ServeDownload handles GET /shares/alias/{alias}/download. See the
+// section header above for the contract.
+func (h *Handler) ServeDownload(w http.ResponseWriter, r *http.Request) {
+	if h.S3 == nil {
+		// L-DL1: don't leak err.Error() to anonymous callers.
+		http.Error(w, "S3 not configured", http.StatusInternalServerError)
+		return
+	}
+	alias := chi.URLParam(r, "alias")
+
+	// Resolve alias → shareID + name + security row in one trip.
+	var shareID string
+	var shareName *string
+	var hashedPwd *string
+	var maxViews *int
+	var views int
+	var exp *time.Time
+	err := h.DB.QueryRowContext(r.Context(), `
+		SELECT s.id, s.name, sec.password, sec.maxViews, s.views, s.expiration
+		FROM shares s
+		JOIN share_aliases sa ON sa.shareId = s.id
+		JOIN share_security sec ON sec.id = s.securityId
+		WHERE sa.alias = ?`, alias).
+		Scan(&shareID, &shareName, &hashedPwd, &maxViews, &views, &exp)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	pwd := passwordFromAuthHeader(r)
+	if pwd == "" {
+		pwd = r.Header.Get("X-Share-Password")
+	}
+
+	if hashedPwd != nil && *hashedPwd != "" {
+		// Reuse the M1 throttle so brute-forcing through this endpoint
+		// counts against the same bucket as the SPA path.
+		maxAttempts, blockSeconds := h.pwThrottleConfig(r.Context())
+		throttle := h.pwThrottleHandle()
+		if blocked := throttle.blockedFor(shareID, maxAttempts, time.Duration(blockSeconds)*time.Second); blocked > 0 {
+			w.Header().Set("Retry-After", strconv.Itoa(int(blocked.Round(time.Second).Seconds())))
+			http.Error(w,
+				"too many failed password attempts; try again in "+blocked.Round(time.Second).String(),
+				http.StatusTooManyRequests)
+			return
+		}
+		if pwd == "" {
+			challengeBasicAuth(w, shareName)
+			return
+		}
+		if !auth.VerifyPassword(pwd, *hashedPwd) {
+			throttle.recordFailure(shareID)
+			challengeBasicAuth(w, shareName)
+			return
+		}
+		throttle.reset(shareID)
+	}
+
+	// M-DL1: per-share concurrent download cap. Acquired after the
+	// password check so an attacker without the right password can't
+	// burn slots; released by the defer below in all code paths.
+	gate := h.dlGateHandle()
+	if !gate.acquire(shareID) {
+		w.Header().Set("Retry-After", "10")
+		http.Error(w, "too many concurrent downloads of this share; try again shortly", http.StatusTooManyRequests)
+		return
+	}
+	defer gate.release(shareID)
+
+	// Expiry gate.
+	if exp != nil && exp.Before(time.Now()) {
+		http.Error(w, "share has expired", http.StatusGone)
+		return
+	}
+
+	// L-DL4/L-DL5: atomic check-and-increment for views, replacing the
+	// pre-fix sequence of `if views >= maxViews → 410; UPDATE views =
+	// views + 1`. The earlier shape let two concurrent callers both
+	// pass the >= check before either incremented, so a maxViews=N
+	// share could be downloaded N+k times under parallel load. The
+	// CAS WHERE clause shipped here only matches when there's room
+	// left (or no cap is set), and we treat zero rows affected as
+	// "max reached".
+	var maxArg interface{}
+	if maxViews != nil {
+		maxArg = *maxViews
+	}
+	res, dbErr := h.DB.ExecContext(r.Context(), `
+		UPDATE shares
+		SET views = views + 1
+		WHERE id = ?
+		  AND (? IS NULL OR views < ?)`,
+		shareID, maxArg, maxArg)
+	if dbErr != nil {
+		slog.Error("share download: bump views", "share", shareID, "err", dbErr)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		http.Error(w, "share has reached its max views", http.StatusGone)
+		return
+	}
+
+	files, folders, err := h.loadShareContent(r.Context(), shareID)
+	if err != nil {
+		slog.Error("share download: load content", "share", shareID, "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if len(files) == 0 && len(folders) == 0 {
+		http.Error(w, "share is empty", http.StatusGone)
+		return
+	}
+
+	// Common headers for both single-file (302) and zip paths.
+	// M-DL2: Cache-Control private+no-store so a shared HTTP cache
+	// can't store a password-gated share's bytes. Belt-and-suspenders
+	// alongside the share password itself.
+	w.Header().Set("Cache-Control", "private, no-store")
+
+	// Single-file shortcut: redirect to a presigned URL so RustFS
+	// streams the bytes directly and we don't pay backend bandwidth.
+	if len(files) == 1 && len(folders) == 0 {
+		f := files[0]
+		presignedURL, err := h.S3.PresignGet(r.Context(), f.ObjectName, safeZipName(f.Name+"."+f.Extension))
+		if err != nil {
+			slog.Error("share download: presign", "share", shareID, "err", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		// http.Redirect already skips the body for HEAD requests
+		// (Go's stdlib checks r.Method internally), so we don't
+		// need an explicit guard here.
+		http.Redirect(w, r, presignedURL, http.StatusFound)
+		return
+	}
+
+	// Multi-file or has folders → stream a zip.
+	zipName := alias
+	if shareName != nil && *shareName != "" {
+		zipName = *shareName
+	}
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", contentDispositionAttachment(zipName+".zip"))
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	// Zip output is generated on the fly — clients can't seek to a
+	// byte offset without replaying the whole stream, and the bytes
+	// aren't reproducible (timestamps in the zip headers differ run
+	// to run). Explicitly disable range requests so curl -C - bails
+	// out fast instead of producing corrupt resumes.
+	w.Header().Set("Accept-Ranges", "none")
+
+	// L-DL2: HEAD probes — answer with headers only, no body. Skip
+	// the zip stream entirely.
+	if r.Method == http.MethodHead {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	zw := zip.NewWriter(w)
+	defer zw.Close()
+
+	// Top-level files: kept at the zip root. safeZipName neutralises
+	// path separators / leading dots so a file named `../../foo` can't
+	// land outside the extraction target (H-DL1, M-DL3).
+	for _, f := range files {
+		entry := safeZipName(f.Name + "." + f.Extension)
+		if err := h.streamObjectIntoZip(r.Context(), zw, f.ObjectName, entry); err != nil {
+			// We've already written headers + partial zip bytes —
+			// can't switch to a JSON error. Best we can do is stop
+			// writing; the client sees a truncated archive and the
+			// `defer zw.Close()` will still flush central directory.
+			slog.Warn("share download: stream object", "share", shareID, "object", f.ObjectName, "err", err)
+			return
+		}
+	}
+	// Folders: walk recursively. Each folder becomes a directory
+	// prefix in the zip; files inside get nested paths. Each
+	// component is sanitised, and the recursion is bounded by
+	// maxFolderRecursionDepth to keep a malicious nesting from
+	// blowing the goroutine stack.
+	for _, fol := range folders {
+		prefix := safeZipName(fol.Name)
+		if err := h.streamFolderIntoZip(r.Context(), zw, fol.ID, prefix, 0); err != nil {
+			slog.Warn("share download: stream folder", "share", shareID, "folder", fol.ID, "err", err)
+			return
+		}
+	}
+}
+
+// loadShareContent returns the (top-level files, top-level folders)
+// of a share. Folder content is walked separately at zip time so we
+// can keep the file-row loader simple.
+func (h *Handler) loadShareContent(ctx context.Context, shareID string) ([]FileSummary, []FolderSummary, error) {
+	var files []FileSummary
+	rowsF, err := h.DB.QueryxContext(ctx, `
+		SELECT f.id, f.name, f.description, f.extension, f.size, f.objectName, f.userId, f.folderId, f.createdAt, f.updatedAt
+		FROM files f JOIN _ShareFiles sf ON sf.A = f.id WHERE sf.B = ?`, shareID)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rowsF.Close()
+	for rowsF.Next() {
+		var fs FileSummary
+		var created, updated dbtypes.PrismaTime
+		if err := rowsF.Scan(&fs.ID, &fs.Name, &fs.Description, &fs.Extension, &fs.Size, &fs.ObjectName, &fs.UserID, &fs.FolderID, &created, &updated); err == nil {
+			files = append(files, fs)
+		}
+	}
+
+	var folders []FolderSummary
+	rowsG, err := h.DB.QueryxContext(ctx, `
+		SELECT f.id, f.name, f.description, f.parentId, f.createdAt, f.updatedAt
+		FROM folders f JOIN _ShareFolders sf ON sf.A = f.id WHERE sf.B = ?`, shareID)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rowsG.Close()
+	for rowsG.Next() {
+		var fs FolderSummary
+		var created, updated dbtypes.PrismaTime
+		if err := rowsG.Scan(&fs.ID, &fs.Name, &fs.Description, &fs.ParentID, &created, &updated); err == nil {
+			folders = append(folders, fs)
+		}
+	}
+	return files, folders, nil
+}
+
+// streamObjectIntoZip pulls one S3 object and writes it to the zip
+// stream at `entryName`. On error it returns without writing — the
+// zip is left in a partial state for the caller to handle.
+func (h *Handler) streamObjectIntoZip(ctx context.Context, zw *zip.Writer, objectName, entryName string) error {
+	out, err := h.S3.Client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(h.S3.Bucket),
+		Key:    aws.String(objectName),
+	})
+	if err != nil {
+		return err
+	}
+	defer out.Body.Close()
+	w, err := zw.Create(entryName)
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(w, out.Body)
+	return err
+}
+
+// streamFolderIntoZip walks one share-attached folder depth-first and
+// writes its files into the zip at `prefix/...`. parentId-based
+// recursion keeps each level cheap (one indexed query per folder
+// instead of a recursive CTE).
+//
+// depth is bounded by maxFolderRecursionDepth (L-DL3) — past that we
+// stop recursing silently. Each name component is run through
+// safeZipName before being joined into the path so a folder named
+// `../escape` can't bubble out of the zip root (H-DL1).
+func (h *Handler) streamFolderIntoZip(ctx context.Context, zw *zip.Writer, folderID, prefix string, depth int) error {
+	if depth > maxFolderRecursionDepth {
+		// Truncate silently — the alternative (returning an error)
+		// would abort the whole download. Real-world shares never
+		// nest this deep, so a trip here means malicious nesting.
+		return nil
+	}
+	// Files directly inside this folder.
+	rowsF, err := h.DB.QueryxContext(ctx,
+		`SELECT name, extension, objectName FROM files WHERE folderId = ?`, folderID)
+	if err != nil {
+		return err
+	}
+	type f struct{ name, ext, obj string }
+	var files []f
+	for rowsF.Next() {
+		var x f
+		if err := rowsF.Scan(&x.name, &x.ext, &x.obj); err == nil {
+			files = append(files, x)
+		}
+	}
+	rowsF.Close()
+	for _, x := range files {
+		entry := path.Join(prefix, safeZipName(x.name+"."+x.ext))
+		if err := h.streamObjectIntoZip(ctx, zw, x.obj, entry); err != nil {
+			return err
+		}
+	}
+	// Recurse into child folders.
+	rowsG, err := h.DB.QueryxContext(ctx,
+		`SELECT id, name FROM folders WHERE parentId = ?`, folderID)
+	if err != nil {
+		return err
+	}
+	type fol struct{ id, name string }
+	var subs []fol
+	for rowsG.Next() {
+		var x fol
+		if err := rowsG.Scan(&x.id, &x.name); err == nil {
+			subs = append(subs, x)
+		}
+	}
+	rowsG.Close()
+	for _, s := range subs {
+		sub := path.Join(prefix, safeZipName(s.name))
+		if err := h.streamFolderIntoZip(ctx, zw, s.id, sub, depth+1); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// passwordFromAuthHeader extracts the password portion of a Basic auth
+// header. We deliberately ignore the username — share passwords don't
+// have a user identifier on the request side, and forcing curl users
+// to type `-u user:secret` instead of `-u :secret` would surprise.
+func passwordFromAuthHeader(r *http.Request) string {
+	authz := r.Header.Get("Authorization")
+	if !strings.HasPrefix(authz, "Basic ") {
+		return ""
+	}
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(authz, "Basic "))
+	if err != nil {
+		return ""
+	}
+	parts := strings.SplitN(string(raw), ":", 2)
+	if len(parts) != 2 {
+		return ""
+	}
+	return parts[1]
+}
+
+// challengeBasicAuth writes the 401 + WWW-Authenticate header so curl
+// (`curl -u : URL`) prompts interactively and shell scripts can detect
+// auth requirement programmatically.
+func challengeBasicAuth(w http.ResponseWriter, shareName *string) {
+	realm := "Palmr share"
+	if shareName != nil && *shareName != "" {
+		// Strip quote/control chars from the realm string — they'd
+		// break the WWW-Authenticate header otherwise.
+		realm = `Palmr share — ` + sanitizeRealm(*shareName)
+	}
+	w.Header().Set("WWW-Authenticate", `Basic realm="`+realm+`"`)
+	http.Error(w, "Password required", http.StatusUnauthorized)
+}
+
+// sanitizeRealm strips anything that would break the WWW-Authenticate
+// header's quoted-string syntax — quote, backslash, control chars.
+func sanitizeRealm(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r < 0x20 || r == '"' || r == '\\' {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// contentDispositionAttachment builds an RFC 5987-compliant
+// Content-Disposition header value (L-DL6). Plain `filename="..."` is
+// kept for legacy clients (it carries the ASCII-safe form), while a
+// `filename*=UTF-8''...` parameter carries the original unicode for
+// modern browsers / curl / wget. Without the starred form, names with
+// non-ASCII characters get mangled by some clients.
+func contentDispositionAttachment(filename string) string {
+	ascii := asciiFallback(filename)
+	header := `attachment; filename="` + ascii + `"`
+	if !isASCII(filename) {
+		header += `; filename*=UTF-8''` + url.PathEscape(filename)
+	}
+	return header
+}
+
+// asciiFallback produces the legacy `filename="..."` token. Quotes,
+// backslashes and control characters would break the quoted-string
+// syntax (or smuggle headers), so we replace them with underscores.
+// Non-ASCII runes get the same treatment — they're allowed by some
+// clients but rejected by others; the filename* parameter carries the
+// real unicode anyway.
+func asciiFallback(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r < 0x20 || r == '"' || r == '\\' || r > 0x7e {
+			b.WriteByte('_')
+			continue
+		}
+		b.WriteRune(r)
+	}
+	out := b.String()
+	if out == "" {
+		return "download"
+	}
+	return out
+}
+
+func isASCII(s string) bool {
+	for _, r := range s {
+		if r > 0x7e || r < 0x20 {
+			return false
+		}
+	}
+	return true
+}
+
+// safeZipName converts a single user-supplied name into a single zip
+// path component (H-DL1, M-DL3). The result never contains a path
+// separator and never resolves above its parent directory, so naive
+// `unzip` implementations can't be tricked into writing outside the
+// extraction target.
+//
+// We replace `/`, `\`, and NUL with `_` (so a name like `foo/bar`
+// becomes `foo_bar`, not a subdirectory); trim leading dots (so
+// `..` / `.` / `.hidden` don't survive as their own segment); and
+// substitute `_` when everything got stripped.
+func safeZipName(raw string) string {
+	if raw == "" {
+		return "_"
+	}
+	cleaned := strings.Map(func(r rune) rune {
+		if r == '/' || r == '\\' || r == 0 {
+			return '_'
+		}
+		// Strip ASCII control bytes too — they're legal in unicode but
+		// confuse a lot of tooling.
+		if r < 0x20 {
+			return '_'
+		}
+		return r
+	}, raw)
+	cleaned = strings.TrimLeft(cleaned, ".")
+	if cleaned == "" {
+		return "_"
+	}
+	return cleaned
+}
+
+// -----------------------------------------------------------------------------
+// download gate — bounds the number of in-flight downloads per share
+// (M-DL1). Process-local, deliberately small; the real "stop a
+// botnet" answer is at the reverse proxy. This is just a backstop so
+// one popular share can't drain the whole goroutine pool.
+// -----------------------------------------------------------------------------
+
+type downloadGate struct {
+	mu       sync.Mutex
+	inFlight map[string]int
+	max      int
+}
+
+func newDownloadGate(max int) *downloadGate {
+	if max <= 0 {
+		max = 1
+	}
+	return &downloadGate{inFlight: map[string]int{}, max: max}
+}
+
+// acquire reserves a slot for shareID and returns true if granted.
+// Callers MUST call release exactly once when granted, regardless of
+// the response code they ended up writing.
+func (g *downloadGate) acquire(shareID string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.inFlight[shareID] >= g.max {
+		return false
+	}
+	g.inFlight[shareID]++
+	return true
+}
+
+func (g *downloadGate) release(shareID string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.inFlight[shareID]--
+	if g.inFlight[shareID] <= 0 {
+		delete(g.inFlight, shareID)
+	}
+}
+
+// dlGateHandle returns the live gate, allocating one on first use if
+// the Handler was constructed via bare-literal (the constructor path
+// initialises it eagerly, but the legacy pattern still works).
+func (h *Handler) dlGateHandle() *downloadGate {
+	if h.dlGate == nil {
+		h.dlGate = newDownloadGate(maxConcurrentDownloadsPerShare)
+	}
+	return h.dlGate
 }

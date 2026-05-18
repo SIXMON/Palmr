@@ -27,7 +27,9 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"io"
+	"log/slog"
 	"net/http"
+	"net/url"
 	"path"
 	"strconv"
 	"strings"
@@ -110,6 +112,14 @@ type Handler struct {
 	// behind CDN/CGNAT, and the realistic mitigation for that DoS is
 	// rate-limiting at the proxy.
 	pwThrottle *shareThrottle
+
+	// dlGate caps the number of in-flight downloads per share so a
+	// single share can't be used as a bandwidth-amplification target
+	// (M-DL1). Process-local; defaults to maxConcurrentDownloads. The
+	// authoritative DoS protection still belongs at the reverse proxy
+	// (limit_conn, fail2ban) — this is a backstop so one popular
+	// share can't starve all other shares.
+	dlGate *downloadGate
 }
 
 // New is what /cmd/server wires up. It exists so the throttle gets
@@ -118,7 +128,12 @@ type Handler struct {
 // that still set Handler{DB: ...} keep working because we lazy-init in
 // pwThrottleHandle, but New is the recommended path going forward.
 func New(db *sqlx.DB, s3 *storage.S3) *Handler {
-	return &Handler{DB: db, S3: s3, pwThrottle: newShareThrottle()}
+	return &Handler{
+		DB:         db,
+		S3:         s3,
+		pwThrottle: newShareThrottle(),
+		dlGate:     newDownloadGate(maxConcurrentDownloadsPerShare),
+	}
 }
 
 // shareThrottle is an in-memory sliding-window failure counter keyed
@@ -1277,15 +1292,31 @@ func (h *Handler) publicView(ctx context.Context, shareID string) (publicView, e
 
 // RegisterPlain attaches the chi-native download endpoint. We can't
 // use huma here because the response is either a 302 redirect or a
-// streaming zip — neither fits huma's JSON-typed output model.
+// streaming zip — neither fits huma's JSON-typed output model. Both
+// GET and HEAD are registered: some clients (wget --spider, some
+// backup tools) probe with HEAD before downloading.
 func (h *Handler) RegisterPlain(r chi.Router) {
 	r.Get("/shares/alias/{alias}/download", h.ServeDownload)
+	r.Head("/shares/alias/{alias}/download", h.ServeDownload)
 }
+
+// maxConcurrentDownloadsPerShare is the cap enforced by dlGate. Picked
+// to be high enough that legitimate prefetchers / mobile retries don't
+// trip it, low enough that one share can't sustain hundreds of
+// parallel S3 fetches.
+const maxConcurrentDownloadsPerShare = 8
+
+// maxFolderRecursionDepth caps how deep streamFolderIntoZip recurses.
+// Real shares rarely nest past ~5 levels; the bound is purely defensive
+// against malicious parent-chain construction that would blow the
+// Go stack.
+const maxFolderRecursionDepth = 64
 
 // ServeDownload handles GET /shares/alias/{alias}/download. See the
 // section header above for the contract.
 func (h *Handler) ServeDownload(w http.ResponseWriter, r *http.Request) {
 	if h.S3 == nil {
+		// L-DL1: don't leak err.Error() to anonymous callers.
 		http.Error(w, "S3 not configured", http.StatusInternalServerError)
 		return
 	}
@@ -1339,19 +1370,55 @@ func (h *Handler) ServeDownload(w http.ResponseWriter, r *http.Request) {
 		throttle.reset(shareID)
 	}
 
-	// Expiry / max-views gates — same logic as GetByAlias.
+	// M-DL1: per-share concurrent download cap. Acquired after the
+	// password check so an attacker without the right password can't
+	// burn slots; released by the defer below in all code paths.
+	gate := h.dlGateHandle()
+	if !gate.acquire(shareID) {
+		w.Header().Set("Retry-After", "10")
+		http.Error(w, "too many concurrent downloads of this share; try again shortly", http.StatusTooManyRequests)
+		return
+	}
+	defer gate.release(shareID)
+
+	// Expiry gate.
 	if exp != nil && exp.Before(time.Now()) {
 		http.Error(w, "share has expired", http.StatusGone)
 		return
 	}
-	if maxViews != nil && views >= *maxViews {
+
+	// L-DL4/L-DL5: atomic check-and-increment for views, replacing the
+	// pre-fix sequence of `if views >= maxViews → 410; UPDATE views =
+	// views + 1`. The earlier shape let two concurrent callers both
+	// pass the >= check before either incremented, so a maxViews=N
+	// share could be downloaded N+k times under parallel load. The
+	// CAS WHERE clause shipped here only matches when there's room
+	// left (or no cap is set), and we treat zero rows affected as
+	// "max reached".
+	var maxArg interface{}
+	if maxViews != nil {
+		maxArg = *maxViews
+	}
+	res, dbErr := h.DB.ExecContext(r.Context(), `
+		UPDATE shares
+		SET views = views + 1
+		WHERE id = ?
+		  AND (? IS NULL OR views < ?)`,
+		shareID, maxArg, maxArg)
+	if dbErr != nil {
+		slog.Error("share download: bump views", "share", shareID, "err", dbErr)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
 		http.Error(w, "share has reached its max views", http.StatusGone)
 		return
 	}
 
 	files, folders, err := h.loadShareContent(r.Context(), shareID)
 	if err != nil {
-		http.Error(w, "load share content: "+err.Error(), http.StatusInternalServerError)
+		slog.Error("share download: load content", "share", shareID, "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 	if len(files) == 0 && len(folders) == 0 {
@@ -1359,21 +1426,26 @@ func (h *Handler) ServeDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Bump view counter — best-effort so a counter-write failure
-	// doesn't abort the download. Mirrors GetByAlias semantics.
-	_, _ = h.DB.ExecContext(r.Context(),
-		`UPDATE shares SET views = views + 1 WHERE id = ?`, shareID)
+	// Common headers for both single-file (302) and zip paths.
+	// M-DL2: Cache-Control private+no-store so a shared HTTP cache
+	// can't store a password-gated share's bytes. Belt-and-suspenders
+	// alongside the share password itself.
+	w.Header().Set("Cache-Control", "private, no-store")
 
 	// Single-file shortcut: redirect to a presigned URL so RustFS
 	// streams the bytes directly and we don't pay backend bandwidth.
 	if len(files) == 1 && len(folders) == 0 {
 		f := files[0]
-		url, err := h.S3.PresignGet(r.Context(), f.ObjectName, f.Name+"."+f.Extension)
+		presignedURL, err := h.S3.PresignGet(r.Context(), f.ObjectName, safeZipName(f.Name+"."+f.Extension))
 		if err != nil {
-			http.Error(w, "presign: "+err.Error(), http.StatusInternalServerError)
+			slog.Error("share download: presign", "share", shareID, "err", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
-		http.Redirect(w, r, url, http.StatusFound)
+		// http.Redirect already skips the body for HEAD requests
+		// (Go's stdlib checks r.Method internally), so we don't
+		// need an explicit guard here.
+		http.Redirect(w, r, presignedURL, http.StatusFound)
 		return
 	}
 
@@ -1383,7 +1455,7 @@ func (h *Handler) ServeDownload(w http.ResponseWriter, r *http.Request) {
 		zipName = *shareName
 	}
 	w.Header().Set("Content-Type", "application/zip")
-	w.Header().Set("Content-Disposition", `attachment; filename="`+sanitizeFilenameForHeader(zipName)+`.zip"`)
+	w.Header().Set("Content-Disposition", contentDispositionAttachment(zipName+".zip"))
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	// Zip output is generated on the fly — clients can't seek to a
 	// byte offset without replaying the whole stream, and the bytes
@@ -1392,24 +1464,39 @@ func (h *Handler) ServeDownload(w http.ResponseWriter, r *http.Request) {
 	// out fast instead of producing corrupt resumes.
 	w.Header().Set("Accept-Ranges", "none")
 
+	// L-DL2: HEAD probes — answer with headers only, no body. Skip
+	// the zip stream entirely.
+	if r.Method == http.MethodHead {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
 	zw := zip.NewWriter(w)
 	defer zw.Close()
 
-	// Top-level files: kept at the zip root.
+	// Top-level files: kept at the zip root. safeZipName neutralises
+	// path separators / leading dots so a file named `../../foo` can't
+	// land outside the extraction target (H-DL1, M-DL3).
 	for _, f := range files {
-		entry := f.Name + "." + f.Extension
+		entry := safeZipName(f.Name + "." + f.Extension)
 		if err := h.streamObjectIntoZip(r.Context(), zw, f.ObjectName, entry); err != nil {
 			// We've already written headers + partial zip bytes —
 			// can't switch to a JSON error. Best we can do is stop
 			// writing; the client sees a truncated archive and the
 			// `defer zw.Close()` will still flush central directory.
+			slog.Warn("share download: stream object", "share", shareID, "object", f.ObjectName, "err", err)
 			return
 		}
 	}
 	// Folders: walk recursively. Each folder becomes a directory
-	// prefix in the zip; files inside get nested paths.
+	// prefix in the zip; files inside get nested paths. Each
+	// component is sanitised, and the recursion is bounded by
+	// maxFolderRecursionDepth to keep a malicious nesting from
+	// blowing the goroutine stack.
 	for _, fol := range folders {
-		if err := h.streamFolderIntoZip(r.Context(), zw, fol.ID, fol.Name); err != nil {
+		prefix := safeZipName(fol.Name)
+		if err := h.streamFolderIntoZip(r.Context(), zw, fol.ID, prefix, 0); err != nil {
+			slog.Warn("share download: stream folder", "share", shareID, "folder", fol.ID, "err", err)
 			return
 		}
 	}
@@ -1477,7 +1564,18 @@ func (h *Handler) streamObjectIntoZip(ctx context.Context, zw *zip.Writer, objec
 // writes its files into the zip at `prefix/...`. parentId-based
 // recursion keeps each level cheap (one indexed query per folder
 // instead of a recursive CTE).
-func (h *Handler) streamFolderIntoZip(ctx context.Context, zw *zip.Writer, folderID, prefix string) error {
+//
+// depth is bounded by maxFolderRecursionDepth (L-DL3) — past that we
+// stop recursing silently. Each name component is run through
+// safeZipName before being joined into the path so a folder named
+// `../escape` can't bubble out of the zip root (H-DL1).
+func (h *Handler) streamFolderIntoZip(ctx context.Context, zw *zip.Writer, folderID, prefix string, depth int) error {
+	if depth > maxFolderRecursionDepth {
+		// Truncate silently — the alternative (returning an error)
+		// would abort the whole download. Real-world shares never
+		// nest this deep, so a trip here means malicious nesting.
+		return nil
+	}
 	// Files directly inside this folder.
 	rowsF, err := h.DB.QueryxContext(ctx,
 		`SELECT name, extension, objectName FROM files WHERE folderId = ?`, folderID)
@@ -1494,7 +1592,7 @@ func (h *Handler) streamFolderIntoZip(ctx context.Context, zw *zip.Writer, folde
 	}
 	rowsF.Close()
 	for _, x := range files {
-		entry := path.Join(prefix, x.name+"."+x.ext)
+		entry := path.Join(prefix, safeZipName(x.name+"."+x.ext))
 		if err := h.streamObjectIntoZip(ctx, zw, x.obj, entry); err != nil {
 			return err
 		}
@@ -1515,7 +1613,8 @@ func (h *Handler) streamFolderIntoZip(ctx context.Context, zw *zip.Writer, folde
 	}
 	rowsG.Close()
 	for _, s := range subs {
-		if err := h.streamFolderIntoZip(ctx, zw, s.id, path.Join(prefix, s.name)); err != nil {
+		sub := path.Join(prefix, safeZipName(s.name))
+		if err := h.streamFolderIntoZip(ctx, zw, s.id, sub, depth+1); err != nil {
 			return err
 		}
 	}
@@ -1569,17 +1668,132 @@ func sanitizeRealm(s string) string {
 	return b.String()
 }
 
-// sanitizeFilenameForHeader is like sanitizeRealm but kinder to
-// punctuation — we still strip quotes/backslashes/controls so the
-// Content-Disposition header parses, but spaces and unicode pass.
-func sanitizeFilenameForHeader(s string) string {
+// contentDispositionAttachment builds an RFC 5987-compliant
+// Content-Disposition header value (L-DL6). Plain `filename="..."` is
+// kept for legacy clients (it carries the ASCII-safe form), while a
+// `filename*=UTF-8''...` parameter carries the original unicode for
+// modern browsers / curl / wget. Without the starred form, names with
+// non-ASCII characters get mangled by some clients.
+func contentDispositionAttachment(filename string) string {
+	ascii := asciiFallback(filename)
+	header := `attachment; filename="` + ascii + `"`
+	if !isASCII(filename) {
+		header += `; filename*=UTF-8''` + url.PathEscape(filename)
+	}
+	return header
+}
+
+// asciiFallback produces the legacy `filename="..."` token. Quotes,
+// backslashes and control characters would break the quoted-string
+// syntax (or smuggle headers), so we replace them with underscores.
+// Non-ASCII runes get the same treatment — they're allowed by some
+// clients but rejected by others; the filename* parameter carries the
+// real unicode anyway.
+func asciiFallback(s string) string {
 	var b strings.Builder
 	for _, r := range s {
-		if r < 0x20 || r == '"' || r == '\\' {
+		if r < 0x20 || r == '"' || r == '\\' || r > 0x7e {
 			b.WriteByte('_')
 			continue
 		}
 		b.WriteRune(r)
 	}
-	return b.String()
+	out := b.String()
+	if out == "" {
+		return "download"
+	}
+	return out
+}
+
+func isASCII(s string) bool {
+	for _, r := range s {
+		if r > 0x7e || r < 0x20 {
+			return false
+		}
+	}
+	return true
+}
+
+// safeZipName converts a single user-supplied name into a single zip
+// path component (H-DL1, M-DL3). The result never contains a path
+// separator and never resolves above its parent directory, so naive
+// `unzip` implementations can't be tricked into writing outside the
+// extraction target.
+//
+// We replace `/`, `\`, and NUL with `_` (so a name like `foo/bar`
+// becomes `foo_bar`, not a subdirectory); trim leading dots (so
+// `..` / `.` / `.hidden` don't survive as their own segment); and
+// substitute `_` when everything got stripped.
+func safeZipName(raw string) string {
+	if raw == "" {
+		return "_"
+	}
+	cleaned := strings.Map(func(r rune) rune {
+		if r == '/' || r == '\\' || r == 0 {
+			return '_'
+		}
+		// Strip ASCII control bytes too — they're legal in unicode but
+		// confuse a lot of tooling.
+		if r < 0x20 {
+			return '_'
+		}
+		return r
+	}, raw)
+	cleaned = strings.TrimLeft(cleaned, ".")
+	if cleaned == "" {
+		return "_"
+	}
+	return cleaned
+}
+
+// -----------------------------------------------------------------------------
+// download gate — bounds the number of in-flight downloads per share
+// (M-DL1). Process-local, deliberately small; the real "stop a
+// botnet" answer is at the reverse proxy. This is just a backstop so
+// one popular share can't drain the whole goroutine pool.
+// -----------------------------------------------------------------------------
+
+type downloadGate struct {
+	mu       sync.Mutex
+	inFlight map[string]int
+	max      int
+}
+
+func newDownloadGate(max int) *downloadGate {
+	if max <= 0 {
+		max = 1
+	}
+	return &downloadGate{inFlight: map[string]int{}, max: max}
+}
+
+// acquire reserves a slot for shareID and returns true if granted.
+// Callers MUST call release exactly once when granted, regardless of
+// the response code they ended up writing.
+func (g *downloadGate) acquire(shareID string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.inFlight[shareID] >= g.max {
+		return false
+	}
+	g.inFlight[shareID]++
+	return true
+}
+
+func (g *downloadGate) release(shareID string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.inFlight[shareID]--
+	if g.inFlight[shareID] <= 0 {
+		delete(g.inFlight, shareID)
+	}
+}
+
+// dlGateHandle returns the live gate, allocating one on first use if
+// the Handler was constructed via bare-literal (the constructor path
+// initialises it eagerly, but the legacy pattern still works).
+func (h *Handler) dlGateHandle() *downloadGate {
+	if h.dlGate == nil {
+		h.dlGate = newDownloadGate(maxConcurrentDownloadsPerShare)
+	}
+	return h.dlGate
 }

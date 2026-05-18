@@ -130,11 +130,12 @@ func run() error {
 	})
 	// Share + reverse-share have public endpoints (alias views).
 	// share.New initialises the in-memory throttle used by GetByAlias
-	// to rate-limit share-password attempts (M1). A bare
-	// &share.Handler{} literal still works (lazy-init on first
-	// failure) but the constructor is the documented path.
-	shareHandler := share.New(conn)
+	// to rate-limit share-password attempts (M1) and wires S3 for the
+	// chi-native /shares/alias/{alias}/download endpoint (nginx routes
+	// curl/wget hits on /s/{alias} here for direct downloads).
+	shareHandler := share.New(conn, s3client)
 	share.Register(api, shareHandler)
+	shareHandler.RegisterPlain(r)
 
 	rsHandler := &reverseshare.Handler{DB: conn, S3: s3client}
 	reverseshare.Register(api, rsHandler)

@@ -21,21 +21,29 @@ package share
 
 import (
 	dbtypes "github.com/sixmon/palmr/apps/server/internal/db"
+	"archive/zip"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
+	"io"
 	"net/http"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 
 	"github.com/sixmon/palmr/apps/server/internal/auth"
 	apperr "github.com/sixmon/palmr/apps/server/internal/errors"
+	"github.com/sixmon/palmr/apps/server/internal/storage"
 )
 
 type Share struct {
@@ -84,6 +92,12 @@ type FolderSummary struct {
 
 type Handler struct {
 	DB *sqlx.DB
+	// S3 is optional — only the /shares/alias/{alias}/download
+	// endpoint needs it (to presign single-file URLs and to read
+	// objects for the multi-file zip stream). The legacy JSON
+	// endpoints work without it, so leaving it nil is OK for
+	// hosted-only deployments.
+	S3 *storage.S3
 
 	// pwThrottle rate-limits share-password attempts per shareID. We
 	// reuse maxLoginAttempts + loginBlockDuration from app_configs so
@@ -103,8 +117,8 @@ type Handler struct {
 // struct literal would nil-panic on first attempt. Existing literals
 // that still set Handler{DB: ...} keep working because we lazy-init in
 // pwThrottleHandle, but New is the recommended path going forward.
-func New(db *sqlx.DB) *Handler {
-	return &Handler{DB: db, pwThrottle: newShareThrottle()}
+func New(db *sqlx.DB, s3 *storage.S3) *Handler {
+	return &Handler{DB: db, S3: s3, pwThrottle: newShareThrottle()}
 }
 
 // shareThrottle is an in-memory sliding-window failure counter keyed
@@ -1229,4 +1243,343 @@ func (h *Handler) publicView(ctx context.Context, shareID string) (publicView, e
 		v.Alias = &av
 	}
 	return v, nil
+}
+
+// -----------------------------------------------------------------------------
+// Public download endpoint — `GET /shares/alias/{alias}/download`
+//
+// Designed for direct curl/wget access. nginx routes /s/{alias} to this
+// handler when the client doesn't ask for HTML (Accept header check),
+// so the same URL the user copy-pastes in the browser also works as
+// `curl -L -o out.zip https://palmr/s/<alias>`.
+//
+// Password handling, in priority order:
+//   1. `Authorization: Basic <base64(:password)>` — idiomatic curl
+//      (`-u :secret`). The username portion is ignored.
+//   2. `X-Share-Password: <password>` — what the SPA sends today.
+// `?password=` is intentionally NOT accepted: query strings end up in
+// proxy logs and browser history.
+//
+// Response shape:
+//   - Wrong/missing password → 401 + `WWW-Authenticate: Basic realm=...`
+//     so curl can re-prompt interactively and shell scripts can detect.
+//   - Single file & no folders → 302 to a presigned S3 URL. RustFS
+//     streams the bytes directly, zero backend bandwidth.
+//   - Multi-file or any folder → on-the-fly zip via archive/zip.
+//     Constant RAM; we read each S3 object into the zip writer's
+//     stream as it goes. Folder hierarchy is preserved with relative
+//     paths inside the archive.
+//
+// Throttling: shares the same per-shareID failure window as
+// GetByAlias (M1), so brute-force across this endpoint and the SPA
+// path is rate-limited as one bucket.
+// -----------------------------------------------------------------------------
+
+// RegisterPlain attaches the chi-native download endpoint. We can't
+// use huma here because the response is either a 302 redirect or a
+// streaming zip — neither fits huma's JSON-typed output model.
+func (h *Handler) RegisterPlain(r chi.Router) {
+	r.Get("/shares/alias/{alias}/download", h.ServeDownload)
+}
+
+// ServeDownload handles GET /shares/alias/{alias}/download. See the
+// section header above for the contract.
+func (h *Handler) ServeDownload(w http.ResponseWriter, r *http.Request) {
+	if h.S3 == nil {
+		http.Error(w, "S3 not configured", http.StatusInternalServerError)
+		return
+	}
+	alias := chi.URLParam(r, "alias")
+
+	// Resolve alias → shareID + name + security row in one trip.
+	var shareID string
+	var shareName *string
+	var hashedPwd *string
+	var maxViews *int
+	var views int
+	var exp *time.Time
+	err := h.DB.QueryRowContext(r.Context(), `
+		SELECT s.id, s.name, sec.password, sec.maxViews, s.views, s.expiration
+		FROM shares s
+		JOIN share_aliases sa ON sa.shareId = s.id
+		JOIN share_security sec ON sec.id = s.securityId
+		WHERE sa.alias = ?`, alias).
+		Scan(&shareID, &shareName, &hashedPwd, &maxViews, &views, &exp)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	pwd := passwordFromAuthHeader(r)
+	if pwd == "" {
+		pwd = r.Header.Get("X-Share-Password")
+	}
+
+	if hashedPwd != nil && *hashedPwd != "" {
+		// Reuse the M1 throttle so brute-forcing through this endpoint
+		// counts against the same bucket as the SPA path.
+		maxAttempts, blockSeconds := h.pwThrottleConfig(r.Context())
+		throttle := h.pwThrottleHandle()
+		if blocked := throttle.blockedFor(shareID, maxAttempts, time.Duration(blockSeconds)*time.Second); blocked > 0 {
+			w.Header().Set("Retry-After", strconv.Itoa(int(blocked.Round(time.Second).Seconds())))
+			http.Error(w,
+				"too many failed password attempts; try again in "+blocked.Round(time.Second).String(),
+				http.StatusTooManyRequests)
+			return
+		}
+		if pwd == "" {
+			challengeBasicAuth(w, shareName)
+			return
+		}
+		if !auth.VerifyPassword(pwd, *hashedPwd) {
+			throttle.recordFailure(shareID)
+			challengeBasicAuth(w, shareName)
+			return
+		}
+		throttle.reset(shareID)
+	}
+
+	// Expiry / max-views gates — same logic as GetByAlias.
+	if exp != nil && exp.Before(time.Now()) {
+		http.Error(w, "share has expired", http.StatusGone)
+		return
+	}
+	if maxViews != nil && views >= *maxViews {
+		http.Error(w, "share has reached its max views", http.StatusGone)
+		return
+	}
+
+	files, folders, err := h.loadShareContent(r.Context(), shareID)
+	if err != nil {
+		http.Error(w, "load share content: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if len(files) == 0 && len(folders) == 0 {
+		http.Error(w, "share is empty", http.StatusGone)
+		return
+	}
+
+	// Bump view counter — best-effort so a counter-write failure
+	// doesn't abort the download. Mirrors GetByAlias semantics.
+	_, _ = h.DB.ExecContext(r.Context(),
+		`UPDATE shares SET views = views + 1 WHERE id = ?`, shareID)
+
+	// Single-file shortcut: redirect to a presigned URL so RustFS
+	// streams the bytes directly and we don't pay backend bandwidth.
+	if len(files) == 1 && len(folders) == 0 {
+		f := files[0]
+		url, err := h.S3.PresignGet(r.Context(), f.ObjectName, f.Name+"."+f.Extension)
+		if err != nil {
+			http.Error(w, "presign: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		http.Redirect(w, r, url, http.StatusFound)
+		return
+	}
+
+	// Multi-file or has folders → stream a zip.
+	zipName := alias
+	if shareName != nil && *shareName != "" {
+		zipName = *shareName
+	}
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+sanitizeFilenameForHeader(zipName)+`.zip"`)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	// Zip output is generated on the fly — clients can't seek to a
+	// byte offset without replaying the whole stream, and the bytes
+	// aren't reproducible (timestamps in the zip headers differ run
+	// to run). Explicitly disable range requests so curl -C - bails
+	// out fast instead of producing corrupt resumes.
+	w.Header().Set("Accept-Ranges", "none")
+
+	zw := zip.NewWriter(w)
+	defer zw.Close()
+
+	// Top-level files: kept at the zip root.
+	for _, f := range files {
+		entry := f.Name + "." + f.Extension
+		if err := h.streamObjectIntoZip(r.Context(), zw, f.ObjectName, entry); err != nil {
+			// We've already written headers + partial zip bytes —
+			// can't switch to a JSON error. Best we can do is stop
+			// writing; the client sees a truncated archive and the
+			// `defer zw.Close()` will still flush central directory.
+			return
+		}
+	}
+	// Folders: walk recursively. Each folder becomes a directory
+	// prefix in the zip; files inside get nested paths.
+	for _, fol := range folders {
+		if err := h.streamFolderIntoZip(r.Context(), zw, fol.ID, fol.Name); err != nil {
+			return
+		}
+	}
+}
+
+// loadShareContent returns the (top-level files, top-level folders)
+// of a share. Folder content is walked separately at zip time so we
+// can keep the file-row loader simple.
+func (h *Handler) loadShareContent(ctx context.Context, shareID string) ([]FileSummary, []FolderSummary, error) {
+	var files []FileSummary
+	rowsF, err := h.DB.QueryxContext(ctx, `
+		SELECT f.id, f.name, f.description, f.extension, f.size, f.objectName, f.userId, f.folderId, f.createdAt, f.updatedAt
+		FROM files f JOIN _ShareFiles sf ON sf.A = f.id WHERE sf.B = ?`, shareID)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rowsF.Close()
+	for rowsF.Next() {
+		var fs FileSummary
+		var created, updated dbtypes.PrismaTime
+		if err := rowsF.Scan(&fs.ID, &fs.Name, &fs.Description, &fs.Extension, &fs.Size, &fs.ObjectName, &fs.UserID, &fs.FolderID, &created, &updated); err == nil {
+			files = append(files, fs)
+		}
+	}
+
+	var folders []FolderSummary
+	rowsG, err := h.DB.QueryxContext(ctx, `
+		SELECT f.id, f.name, f.description, f.parentId, f.createdAt, f.updatedAt
+		FROM folders f JOIN _ShareFolders sf ON sf.A = f.id WHERE sf.B = ?`, shareID)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rowsG.Close()
+	for rowsG.Next() {
+		var fs FolderSummary
+		var created, updated dbtypes.PrismaTime
+		if err := rowsG.Scan(&fs.ID, &fs.Name, &fs.Description, &fs.ParentID, &created, &updated); err == nil {
+			folders = append(folders, fs)
+		}
+	}
+	return files, folders, nil
+}
+
+// streamObjectIntoZip pulls one S3 object and writes it to the zip
+// stream at `entryName`. On error it returns without writing — the
+// zip is left in a partial state for the caller to handle.
+func (h *Handler) streamObjectIntoZip(ctx context.Context, zw *zip.Writer, objectName, entryName string) error {
+	out, err := h.S3.Client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(h.S3.Bucket),
+		Key:    aws.String(objectName),
+	})
+	if err != nil {
+		return err
+	}
+	defer out.Body.Close()
+	w, err := zw.Create(entryName)
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(w, out.Body)
+	return err
+}
+
+// streamFolderIntoZip walks one share-attached folder depth-first and
+// writes its files into the zip at `prefix/...`. parentId-based
+// recursion keeps each level cheap (one indexed query per folder
+// instead of a recursive CTE).
+func (h *Handler) streamFolderIntoZip(ctx context.Context, zw *zip.Writer, folderID, prefix string) error {
+	// Files directly inside this folder.
+	rowsF, err := h.DB.QueryxContext(ctx,
+		`SELECT name, extension, objectName FROM files WHERE folderId = ?`, folderID)
+	if err != nil {
+		return err
+	}
+	type f struct{ name, ext, obj string }
+	var files []f
+	for rowsF.Next() {
+		var x f
+		if err := rowsF.Scan(&x.name, &x.ext, &x.obj); err == nil {
+			files = append(files, x)
+		}
+	}
+	rowsF.Close()
+	for _, x := range files {
+		entry := path.Join(prefix, x.name+"."+x.ext)
+		if err := h.streamObjectIntoZip(ctx, zw, x.obj, entry); err != nil {
+			return err
+		}
+	}
+	// Recurse into child folders.
+	rowsG, err := h.DB.QueryxContext(ctx,
+		`SELECT id, name FROM folders WHERE parentId = ?`, folderID)
+	if err != nil {
+		return err
+	}
+	type fol struct{ id, name string }
+	var subs []fol
+	for rowsG.Next() {
+		var x fol
+		if err := rowsG.Scan(&x.id, &x.name); err == nil {
+			subs = append(subs, x)
+		}
+	}
+	rowsG.Close()
+	for _, s := range subs {
+		if err := h.streamFolderIntoZip(ctx, zw, s.id, path.Join(prefix, s.name)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// passwordFromAuthHeader extracts the password portion of a Basic auth
+// header. We deliberately ignore the username — share passwords don't
+// have a user identifier on the request side, and forcing curl users
+// to type `-u user:secret` instead of `-u :secret` would surprise.
+func passwordFromAuthHeader(r *http.Request) string {
+	authz := r.Header.Get("Authorization")
+	if !strings.HasPrefix(authz, "Basic ") {
+		return ""
+	}
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(authz, "Basic "))
+	if err != nil {
+		return ""
+	}
+	parts := strings.SplitN(string(raw), ":", 2)
+	if len(parts) != 2 {
+		return ""
+	}
+	return parts[1]
+}
+
+// challengeBasicAuth writes the 401 + WWW-Authenticate header so curl
+// (`curl -u : URL`) prompts interactively and shell scripts can detect
+// auth requirement programmatically.
+func challengeBasicAuth(w http.ResponseWriter, shareName *string) {
+	realm := "Palmr share"
+	if shareName != nil && *shareName != "" {
+		// Strip quote/control chars from the realm string — they'd
+		// break the WWW-Authenticate header otherwise.
+		realm = `Palmr share — ` + sanitizeRealm(*shareName)
+	}
+	w.Header().Set("WWW-Authenticate", `Basic realm="`+realm+`"`)
+	http.Error(w, "Password required", http.StatusUnauthorized)
+}
+
+// sanitizeRealm strips anything that would break the WWW-Authenticate
+// header's quoted-string syntax — quote, backslash, control chars.
+func sanitizeRealm(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r < 0x20 || r == '"' || r == '\\' {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// sanitizeFilenameForHeader is like sanitizeRealm but kinder to
+// punctuation — we still strip quotes/backslashes/controls so the
+// Content-Disposition header parses, but spaces and unicode pass.
+func sanitizeFilenameForHeader(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r < 0x20 || r == '"' || r == '\\' {
+			b.WriteByte('_')
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }

@@ -1,7 +1,8 @@
 import { useState } from "react";
-import { IconDownload, IconFolderOff, IconShare } from "@tabler/icons-react";
+import { IconDownload, IconFolderOff, IconShare, IconTerminal2 } from "@tabler/icons-react";
 import { format } from "date-fns";
 import { useTranslations } from "next-intl";
+import { toast } from "sonner";
 
 import { FilesViewManager } from "@/app/files/components/files-view-manager";
 import { FilePreviewModal } from "@/components/modals/file-preview-modal";
@@ -85,6 +86,35 @@ export function ShareDetails({
     await onDownload(`folder:${folderId}`, folderName);
   };
 
+  // The same /s/{alias} URL the user is reading now also serves
+  // direct downloads to non-HTML clients (curl, wget) — see the
+  // ServeDownload handler in apps/server/internal/modules/share/share.go.
+  // We surface the ready-to-paste curl command here so non-technical
+  // visitors don't have to know the trick exists. The current URL is
+  // already correct (window.location); we just attach `-L` (follow
+  // the 302 to S3 when the share is a single file), an output flag
+  // tied to the share's name, and `-u :<password>` when applicable.
+  const handleCopyCurl = async () => {
+    if (typeof window === "undefined") return;
+    const shareURL = window.location.origin + window.location.pathname.replace(/\/$/, "");
+    // Multi-file shares stream a zip; single-file shares 302 to the
+    // file. Pick a sensible filename for the -o flag in both cases.
+    const outName = hasMultipleFiles
+      ? `${share.name || "share"}.zip`
+      : share.files?.[0]
+        ? `${share.files[0].name}.${share.files[0].extension}`
+        : "download";
+    const pwdFlag = password ? ` -u :${shellQuote(password)}` : "";
+    const cmd = `curl -L${pwdFlag} -o ${shellQuote(outName)} ${shellQuote(shareURL)}`;
+    try {
+      await navigator.clipboard.writeText(cmd);
+      toast.success(t("share.curlCopied"));
+    } catch (err) {
+      console.error("clipboard write failed", err);
+      toast.error(t("share.curlCopyFailed"));
+    }
+  };
+
   return (
     <>
       <Card>
@@ -96,11 +126,24 @@ export function ShareDetails({
                   <IconShare className="w-6 h-6 text-muted-foreground" />
                   <h1 className="text-2xl font-semibold">{share.name || t("share.details.untitled")}</h1>
                 </div>
-                {shareHasItems && hasMultipleFiles && (
-                  <Button onClick={onBulkDownload} className="flex items-center gap-2 w-full sm:w-auto">
-                    <IconDownload className="w-4 h-4" />
-                    {t("share.downloadAll")}
-                  </Button>
+                {shareHasItems && (
+                  <div className="flex flex-col sm:flex-row gap-2 w-full sm:w-auto">
+                    {hasMultipleFiles && (
+                      <Button onClick={onBulkDownload} className="flex items-center gap-2 w-full sm:w-auto">
+                        <IconDownload className="w-4 h-4" />
+                        {t("share.downloadAll")}
+                      </Button>
+                    )}
+                    <Button
+                      variant="outline"
+                      onClick={handleCopyCurl}
+                      className="flex items-center gap-2 w-full sm:w-auto"
+                      title={t("share.copyCurlTooltip")}
+                    >
+                      <IconTerminal2 className="w-4 h-4" />
+                      {t("share.copyCurl")}
+                    </Button>
+                  </div>
                 )}
               </div>
               {share.description && <p className="text-muted-foreground">{share.description}</p>}
@@ -192,4 +235,12 @@ export function ShareDetails({
       )}
     </>
   );
+}
+
+// shellQuote wraps a string in single quotes for safe POSIX shell
+// pasting. Embedded single quotes are escaped as `'\''` (close, escape,
+// reopen). Used for the curl command surfaced by handleCopyCurl — share
+// names, passwords, and filenames can carry spaces, quotes, $, etc.
+function shellQuote(s: string): string {
+  return `'${String(s).replace(/'/g, "'\\''")}'`;
 }

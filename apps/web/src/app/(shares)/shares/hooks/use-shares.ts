@@ -13,7 +13,10 @@ export function useShares() {
   const [shares, setShares] = useState<Share[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState("");
-  const [shareToGenerateLink, setShareToGenerateLink] = useState<Share | null>(null);
+  // `shareToGenerateLink` deliberately lives only in useShareManager —
+  // see the README at the top of that hook. Earlier this hook had its
+  // own duplicate state which the SharesTable never wrote to, so the
+  // "Edit Link" / "Generate Link" dropdown items appeared inert.
 
   const { value: smtpEnabled } = useSecureConfigValue("smtpEnabled");
 
@@ -67,11 +70,9 @@ export function useShares() {
     shares,
     isLoading,
     searchQuery,
-    shareToGenerateLink,
     filteredShares,
     smtpEnabled: smtpEnabled || "false",
     setSearchQuery,
-    setShareToGenerateLink,
     handleCopyLink,
     handleNotifyRecipients,
     loadShares,

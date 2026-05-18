@@ -650,14 +650,28 @@ func (h *Handler) configBool(ctx context.Context, key string, def bool) bool {
 var errNoRows = errors.New("sql: no rows in result set")
 
 // -----------------------------------------------------------------------------
-// POST /auth/forgot-password  { email, origin } → { message }
+// POST /auth/forgot-password  { email } → { message }
 // -----------------------------------------------------------------------------
 
+// ForgotPasswordInput intentionally does NOT accept an `origin` body
+// field. The legacy contract did, and that field was used unmodified
+// to build the reset-link URL emailed to the user — letting any
+// anonymous attacker POST `{email: victim, origin: "https://evil"}`
+// to receive (via the victim's inbox) a real reset link wrapped on
+// the attacker's domain. We now derive the public origin server-side
+// from the trusted forwarded headers set by the edge proxy.
 type ForgotPasswordInput struct {
 	Body struct {
-		Email  string `json:"email" required:"true" format:"email"`
-		Origin string `json:"origin" required:"true"`
+		Email string `json:"email" required:"true" format:"email"`
 	}
+	// Headers below are read from the request directly. Trust hierarchy
+	// is the same as authproviders.frontendURL — X-Forwarded-Host /
+	// X-Forwarded-Proto / X-Forwarded-Port set by the edge proxy
+	// override the bare Host header.
+	XFHost  string `header:"X-Forwarded-Host"`
+	XFProto string `header:"X-Forwarded-Proto"`
+	XFPort  string `header:"X-Forwarded-Port"`
+	Host    string `header:"Host"`
 }
 type MessageOutput struct {
 	Body struct {
@@ -709,7 +723,7 @@ func (h *Handler) ForgotPassword(ctx context.Context, in *ForgotPasswordInput) (
 
 	// Send the email. If SMTP isn't configured, log + still pretend success.
 	if h.Mailer != nil {
-		origin := strings.TrimRight(in.Body.Origin, "/")
+		origin := publicOrigin(in.XFProto, in.XFHost, in.XFPort, in.Host)
 		link := origin + "/reset-password?token=" + token
 		htmlBody := `<p>Click the link below to reset your password. The link expires in ` +
 			(time.Duration(ttlSec) * time.Second).String() + `.</p>` +
@@ -718,6 +732,41 @@ func (h *Handler) ForgotPassword(ctx context.Context, in *ForgotPasswordInput) (
 		_ = h.Mailer.Send(ctx, email, "Reset your Palmr password", htmlBody)
 	}
 	return out, nil
+}
+
+// publicOrigin reconstructs the canonical public URL of the Palmr
+// frontend from the trusted forwarded headers set by the edge proxy.
+// Mirrors the port-stripping policy of authproviders.frontendURL —
+// see that function for the rationale. Falls back to the bare Host
+// header when forwarded values aren't set (typical in dev / direct
+// access). Returns scheme + host with no trailing slash.
+func publicOrigin(xfProto, xfHost, xfPort, hostHeader string) string {
+	scheme := "https"
+	if xfProto != "" {
+		scheme = strings.SplitN(xfProto, ",", 2)[0]
+	} else if !strings.HasPrefix(hostHeader, "[") &&
+		(strings.HasPrefix(hostHeader, "localhost") || strings.HasPrefix(hostHeader, "127.0.0.1")) {
+		scheme = "http"
+	}
+	host := hostHeader
+	if xfHost != "" {
+		host = strings.SplitN(xfHost, ",", 2)[0]
+	}
+	host = strings.TrimSpace(host)
+	if xfPort != "" {
+		xfp := strings.TrimSpace(xfPort)
+		if i := strings.LastIndexByte(host, ':'); i >= 0 {
+			host = host[:i]
+		}
+		if (scheme == "https" && xfp != "443") || (scheme == "http" && xfp != "80") {
+			host = host + ":" + xfp
+		}
+	} else if scheme == "https" {
+		if i := strings.LastIndexByte(host, ':'); i >= 0 {
+			host = host[:i]
+		}
+	}
+	return scheme + "://" + host
 }
 
 // -----------------------------------------------------------------------------

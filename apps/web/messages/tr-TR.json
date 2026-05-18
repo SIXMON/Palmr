@@ -451,7 +451,7 @@
   },
   "footer": {
     "poweredBy": "Tarafından destekleniyor:",
-    "kyanHomepage": "Kyantech Ana Sayfası"
+    "sponsorHomepage": "Sixmon Ana Sayfası"
   },
   "forgotPassword": {
     "emailLabel": "E-posta Adresi",
@@ -1905,7 +1905,8 @@
       "active": "Etkin",
       "inactive": "Devre Dışı",
       "admin": "Yönetici",
-      "userr": "Kullanıcı"
+      "userr": "Kullanıcı",
+      "storageUsed": "Kullanılan depolama"
     },
     "invite": {
       "button": "Davet Bağlantısı Oluştur",

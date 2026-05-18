@@ -451,7 +451,7 @@
   },
   "footer": {
     "poweredBy": "Mogelijk gemaakt door",
-    "kyanHomepage": "Kyantech homepage"
+    "sponsorHomepage": "Sixmon homepage"
   },
   "forgotPassword": {
     "emailLabel": "E-mailadres",
@@ -1905,7 +1905,8 @@
       "active": "Actief",
       "inactive": "Inactief",
       "admin": "Beheerder",
-      "userr": "Gebruiker"
+      "userr": "Gebruiker",
+      "storageUsed": "Gebruikte opslag"
     },
     "invite": {
       "button": "Genereer Uitnodigingslink",

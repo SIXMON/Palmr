@@ -211,6 +211,17 @@ func (h *Handler) GetAllConfigs(ctx context.Context, _ *struct{}) (*ConfigsOutpu
 		if err := rows.Scan(&c.Key, &c.Value, &c.Type, &c.Group, &c.UpdatedAt); err != nil {
 			return nil, apperr.Internal("scan config: " + err.Error())
 		}
+		// SECURITY: redact the value of sensitive keys even for admins.
+		// Admin sessions live in the browser, get screen-shared, end
+		// up in support transcripts. Returning the raw SMTP password
+		// (or any future secret-bearing config) means each admin
+		// session is one tab-switch away from a credential leak.
+		// Admins who need to rotate the secret can still issue an
+		// UpdateConfig — the UI should treat an empty value as
+		// "unchanged".
+		if sensitiveKeys[c.Key] && c.Value != "" {
+			c.Value = ""
+		}
 		out.Body.Configs = append(out.Body.Configs, c)
 	}
 	return out, nil
@@ -237,6 +248,13 @@ func (h *Handler) UpdateConfig(ctx context.Context, in *UpdateConfigInput) (*Upd
 	if _, err := auth.EnsureAdmin(ctx, h.DB); err != nil {
 		return nil, apperr.Forbidden(err.Error())
 	}
+	// Sensitive keys are returned redacted (empty string) on GET. If
+	// the admin re-saves the group without retyping the secret, we'd
+	// wipe the stored value. Treat an empty payload value as
+	// "leave the existing one alone" for sensitive keys.
+	if sensitiveKeys[in.Key] && in.Body.Value == "" {
+		return nil, apperr.BadRequest("empty value not allowed for secret keys; provide the new value or omit this key from the request")
+	}
 	res, err := h.DB.ExecContext(ctx,
 		`UPDATE app_configs SET value = ?, updatedAt = CURRENT_TIMESTAMP WHERE key = ?`,
 		in.Body.Value, in.Key)
@@ -252,6 +270,11 @@ func (h *Handler) UpdateConfig(ctx context.Context, in *UpdateConfigInput) (*Upd
 		`SELECT key, value, type, "group", updatedAt FROM app_configs WHERE key = ?`, in.Key).
 		Scan(&c.Key, &c.Value, &c.Type, &c.Group, &c.UpdatedAt); err != nil {
 		return nil, apperr.Internal("reload config: " + err.Error())
+	}
+	// Redact the echoed value too so the secret never leaks back over
+	// the wire even on a successful write.
+	if sensitiveKeys[c.Key] {
+		c.Value = ""
 	}
 	out := &UpdateConfigOutput{}
 	out.Body.Config = c
@@ -280,6 +303,14 @@ func (h *Handler) BulkUpdateConfigs(ctx context.Context, in *BulkUpdateInput) (*
 	}
 	defer tx.Rollback()
 	for _, c := range in.Body {
+		// Match UpdateConfig's behaviour for sensitive keys: an empty
+		// value is treated as "leave the existing secret alone"
+		// (because reads return the value redacted; the form would
+		// otherwise wipe the password every time the admin saves the
+		// SMTP group without typing it again).
+		if sensitiveKeys[c.Key] && c.Value == "" {
+			continue
+		}
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE app_configs SET value = ?, updatedAt = CURRENT_TIMESTAMP WHERE key = ?`,
 			c.Value, c.Key); err != nil {

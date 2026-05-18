@@ -129,7 +129,11 @@ func run() error {
 		SecureSite: cfg.SecureSite, CookieTTL: cfg.JWTTTL(),
 	})
 	// Share + reverse-share have public endpoints (alias views).
-	shareHandler := &share.Handler{DB: conn}
+	// share.New initialises the in-memory throttle used by GetByAlias
+	// to rate-limit share-password attempts (M1). A bare
+	// &share.Handler{} literal still works (lazy-init on first
+	// failure) but the constructor is the documented path.
+	shareHandler := share.New(conn)
 	share.Register(api, shareHandler)
 
 	rsHandler := &reverseshare.Handler{DB: conn, S3: s3client}
@@ -231,12 +235,28 @@ func authOptional(mw *auth.Middleware) func(http.Handler) http.Handler {
 			req := r
 			if c, err := r.Cookie("token"); err == nil && c.Value != "" {
 				if claims, verr := mw.Signer.Verify(c.Value); verr == nil {
-					req = r.WithContext(auth.WithUser(r.Context(), auth.UserCtx{
-						UserID:  claims.UserID,
-						IsAdmin: claims.IsAdmin,
-						Active:  true,
-						JTI:     claims.JTI,
-					}))
+					// SECURITY: do NOT trust IsAdmin / IsActive from the
+					// JWT alone. The token lives for the full TTL even
+					// after the user is demoted or deactivated — without
+					// a live DB lookup, revoking admin or freezing an
+					// account does nothing until the user logs out and
+					// back in. We pay one indexed (`users.id` PK)
+					// SELECT per authenticated request to keep this
+					// closed; on a DB error or missing row we drop the
+					// context entirely (treated as anonymous).
+					var row struct {
+						IsAdmin  bool `db:"isAdmin"`
+						IsActive bool `db:"isActive"`
+					}
+					if err := mw.DB.GetContext(r.Context(), &row,
+						`SELECT isAdmin, isActive FROM users WHERE id = ?`, claims.UserID); err == nil && row.IsActive {
+						req = r.WithContext(auth.WithUser(r.Context(), auth.UserCtx{
+							UserID:  claims.UserID,
+							IsAdmin: row.IsAdmin,
+							Active:  true,
+							JTI:     claims.JTI,
+						}))
+					}
 				}
 			}
 			next.ServeHTTP(w, req)
@@ -247,6 +267,17 @@ func authOptional(mw *auth.Middleware) func(http.Handler) http.Handler {
 func corsMiddleware(allow []string) func(http.Handler) http.Handler {
 	set := map[string]bool{}
 	for _, o := range allow {
+		// SECURITY (L6): a bare "*" combined with the
+		// `Access-Control-Allow-Credentials: true` header below is
+		// rejected by browsers anyway, but more importantly it's
+		// almost never what the operator actually wants — they
+		// either meant "any subdomain" (which still has to be
+		// enumerated) or got the env-var wrong. Refuse to register
+		// the wildcard so a misconfigured deploy fails closed
+		// instead of silently shipping a broken header.
+		if o == "*" {
+			continue
+		}
 		set[o] = true
 	}
 	return func(next http.Handler) http.Handler {

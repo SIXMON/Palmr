@@ -7,7 +7,7 @@ import { source } from "@/lib/source";
 
 export default function Layout({ children }: { children: ReactNode }) {
   return (
-    <DocsLayout tree={source.pageTree} {...baseOptions} githubUrl="https://github.com/kyantech/Palmr" links={[]}>
+    <DocsLayout tree={source.pageTree} {...baseOptions} githubUrl="https://github.com/SIXMON/Palmr" links={[]}>
       {children}
       <V3BetaModal />
     </DocsLayout>

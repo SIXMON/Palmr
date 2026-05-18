@@ -39,20 +39,20 @@ export default function AuthCallbackPage() {
       return;
     }
 
-    // Legacy fallback: some deployments hand the JWT back via the URL
-    // (`?token=…`) instead of a cookie. Set it as a cookie so the
-    // subsequent /auth/me call picks it up.
-    const token = searchParams.get("token");
-    if (token) {
-      document.cookie = `token=${token}; path=/; max-age=${7 * 24 * 60 * 60}; samesite=lax`;
-    }
+    // SECURITY: the `?token=` query-string branch that used to live
+    // here was a session-fixation vector — any third party could craft
+    // `https://palmr.tld/auth/callback?token=<attacker-jwt>` and the
+    // SPA would pose the attacker's JWT into the victim's `token`
+    // cookie, silently logging them into the attacker's account. Our
+    // backend issues the cookie via Set-Cookie on the OAuth callback;
+    // we deliberately do not accept tokens from the URL.
 
-    // In the default (cookie) flow, the backend has already set the
-    // session cookie on the Set-Cookie response of the OAuth callback.
-    // We just need to confirm the session is valid and push the user
-    // to /dashboard. AuthProvider's own mount-time fetch races us, so
-    // we update its state directly here on success to avoid a flash
-    // of unauthenticated state on /dashboard.
+    // The backend has already set the session cookie on the Set-Cookie
+    // response of the OAuth callback. We just need to confirm the
+    // session is valid and push the user to /dashboard. AuthProvider's
+    // own mount-time fetch races us, so we update its state directly
+    // here on success to avoid a flash of unauthenticated state on
+    // /dashboard.
     (async () => {
       try {
         const response = await getCurrentUser();

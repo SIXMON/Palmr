@@ -455,7 +455,7 @@
   },
   "footer": {
     "poweredBy": "ขับเคลื่อนโดย",
-    "kyanHomepage": "หน้าแรก Kyantech"
+    "sponsorHomepage": "หน้าแรก Sixmon"
   },
   "forgotPassword": {
     "emailLabel": "ที่อยู่อีเมล",
@@ -1909,7 +1909,8 @@
       "active": "ใช้งานอยู่",
       "inactive": "ไม่ใช้งาน",
       "admin": "ผู้ดูแลระบบ",
-      "userr": "ผู้ใช้"
+      "userr": "ผู้ใช้",
+      "storageUsed": "พื้นที่ที่ใช้"
     },
     "invite": {
       "button": "สร้างลิงค์เชิญ",

@@ -142,11 +142,11 @@
 
 ## ⭐ Star History
 
-  <a href="https://www.star-history.com/#kyantech/Palmr&Date">
+  <a href="https://www.star-history.com/#SIXMON/Palmr&Date">
    <picture>
-     <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=kyantech/Palmr&type=Date&theme=dark" />
-     <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=kyantech/Palmr&type=Date" />
-     <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=kyantech/Palmr&type=Date" />
+     <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=SIXMON/Palmr&type=Date&theme=dark" />
+     <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=SIXMON/Palmr&type=Date" />
+     <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=SIXMON/Palmr&type=Date" />
    </picture>
   </a>
 

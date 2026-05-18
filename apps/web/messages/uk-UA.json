@@ -455,7 +455,7 @@
   },
   "footer": {
     "poweredBy": "Працює на",
-    "kyanHomepage": "Домашня сторінка Kyantech"
+    "sponsorHomepage": "Домашня сторінка Sixmon"
   },
   "forgotPassword": {
     "emailLabel": "Адреса електронної пошти",
@@ -1909,7 +1909,8 @@
       "active": "Активний",
       "inactive": "Неактивний",
       "admin": "Адміністратор",
-      "userr": "Користувач"
+      "userr": "Користувач",
+      "storageUsed": "Використано сховища"
     },
     "invite": {
       "button": "Створити посилання для запрошення",

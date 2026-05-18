@@ -25,7 +25,9 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -82,6 +84,105 @@ type FolderSummary struct {
 
 type Handler struct {
 	DB *sqlx.DB
+
+	// pwThrottle rate-limits share-password attempts per shareID. We
+	// reuse maxLoginAttempts + loginBlockDuration from app_configs so
+	// the admin doesn't get a third knob — the throttle is read each
+	// request through pwThrottleConfig.
+	//
+	// Trade-off: keyed by shareID, so one attacker can lock everyone
+	// out of a popular shared file for the duration of the block
+	// window. That's intentional — the alternative (per-IP) is fragile
+	// behind CDN/CGNAT, and the realistic mitigation for that DoS is
+	// rate-limiting at the proxy.
+	pwThrottle *shareThrottle
+}
+
+// New is what /cmd/server wires up. It exists so the throttle gets
+// initialised — the zero-value Handler had no failure map, so a direct
+// struct literal would nil-panic on first attempt. Existing literals
+// that still set Handler{DB: ...} keep working because we lazy-init in
+// pwThrottleHandle, but New is the recommended path going forward.
+func New(db *sqlx.DB) *Handler {
+	return &Handler{DB: db, pwThrottle: newShareThrottle()}
+}
+
+// shareThrottle is an in-memory sliding-window failure counter keyed
+// by shareID. Lives for the process lifetime — restarting the server
+// wipes the counters, which is fine: a brute-forcer would just lose
+// their progress.
+type shareThrottle struct {
+	mu       sync.Mutex
+	failures map[string][]time.Time
+}
+
+func newShareThrottle() *shareThrottle {
+	return &shareThrottle{failures: map[string][]time.Time{}}
+}
+
+// blockedFor reports how long the caller must back off for, or 0 if
+// they can attempt now. We drop timestamps older than `window` while
+// we're holding the lock, so the map can't grow unbounded.
+func (t *shareThrottle) blockedFor(shareID string, maxAttempts int, window time.Duration) time.Duration {
+	if maxAttempts <= 0 || window <= 0 {
+		return 0
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	cutoff := time.Now().Add(-window)
+	prev := t.failures[shareID]
+	fresh := prev[:0]
+	for _, ts := range prev {
+		if ts.After(cutoff) {
+			fresh = append(fresh, ts)
+		}
+	}
+	if len(fresh) == 0 {
+		delete(t.failures, shareID)
+	} else {
+		t.failures[shareID] = fresh
+	}
+	if len(fresh) < maxAttempts {
+		return 0
+	}
+	return time.Until(fresh[0].Add(window))
+}
+
+func (t *shareThrottle) recordFailure(shareID string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.failures[shareID] = append(t.failures[shareID], time.Now())
+}
+
+func (t *shareThrottle) reset(shareID string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.failures, shareID)
+}
+
+// pwThrottleHandle returns the live throttle, allocating a fresh one
+// on first use if the caller used the bare Handler{} literal. Keeps
+// the constructor optional.
+func (h *Handler) pwThrottleHandle() *shareThrottle {
+	if h.pwThrottle == nil {
+		h.pwThrottle = newShareThrottle()
+	}
+	return h.pwThrottle
+}
+
+func (h *Handler) pwThrottleConfig(ctx context.Context) (maxAttempts int, blockSeconds int) {
+	var maxStr, blockStr string
+	_ = h.DB.GetContext(ctx, &maxStr, `SELECT value FROM app_configs WHERE key = 'maxLoginAttempts'`)
+	_ = h.DB.GetContext(ctx, &blockStr, `SELECT value FROM app_configs WHERE key = 'loginBlockDuration'`)
+	maxAttempts, _ = strconv.Atoi(maxStr)
+	blockSeconds, _ = strconv.Atoi(blockStr)
+	if maxAttempts < 0 {
+		maxAttempts = 0
+	}
+	if blockSeconds < 0 {
+		blockSeconds = 0
+	}
+	return
 }
 
 func Register(api huma.API, h *Handler) {
@@ -175,10 +276,16 @@ func (h *Handler) Create(ctx context.Context, in *ShareCreateInput) (*ShareCreat
 		return nil, apperr.Internal("create share: " + err.Error())
 	}
 
-	// Attach files (M2M table: _ShareFiles)
+	// Attach files (M2M table: _ShareFiles). SECURITY: the IDs come
+	// from the request body — without an ownership check the caller
+	// could attach someone else's file and then make it publicly
+	// downloadable via the share alias.
 	for _, fid := range in.Body.Files {
 		if fid == "" {
 			continue
+		}
+		if err := assertFileOwnedBy(ctx, tx, fid, uc.UserID); err != nil {
+			return nil, err
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO _ShareFiles (A, B) VALUES (?, ?)`, fid, id); err != nil {
 			return nil, apperr.Internal("attach file: " + err.Error())
@@ -187,6 +294,9 @@ func (h *Handler) Create(ctx context.Context, in *ShareCreateInput) (*ShareCreat
 	for _, fid := range in.Body.Folders {
 		if fid == "" {
 			continue
+		}
+		if err := assertFolderOwnedBy(ctx, tx, fid, uc.UserID); err != nil {
+			return nil, err
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO _ShareFolders (A, B) VALUES (?, ?)`, fid, id); err != nil {
 			return nil, apperr.Internal("attach folder: " + err.Error())
@@ -449,11 +559,26 @@ func (h *Handler) AddItems(ctx context.Context, in *ShareItemsInput) (*ShareGetO
 	if err := h.assertOwner(ctx, in.ShareID, uc.UserID); err != nil {
 		return nil, err
 	}
+	// SECURITY: verify each id is owned by the caller before joining
+	// it to the share. Without this, an owner of share A could attach
+	// user B's files to A and expose them via A's public alias.
 	for _, fid := range in.Body.Files {
-		dbtypes.LogBestEffort(ctx, "share.share.insert.or.ignore.into", h.DB, `INSERT OR IGNORE INTO _ShareFiles (A, B) VALUES (?, ?)`, fid, in.ShareID)
+		if fid == "" {
+			continue
+		}
+		if err := assertFileOwnedBy(ctx, h.DB, fid, uc.UserID); err != nil {
+			return nil, err
+		}
+		dbtypes.LogBestEffort(ctx, "share.attach_file", h.DB, `INSERT OR IGNORE INTO _ShareFiles (A, B) VALUES (?, ?)`, fid, in.ShareID)
 	}
 	for _, fid := range in.Body.Folders {
-		dbtypes.LogBestEffort(ctx, "share.share.insert.or.ignore.into", h.DB, `INSERT OR IGNORE INTO _ShareFolders (A, B) VALUES (?, ?)`, fid, in.ShareID)
+		if fid == "" {
+			continue
+		}
+		if err := assertFolderOwnedBy(ctx, h.DB, fid, uc.UserID); err != nil {
+			return nil, err
+		}
+		dbtypes.LogBestEffort(ctx, "share.attach_folder", h.DB, `INSERT OR IGNORE INTO _ShareFolders (A, B) VALUES (?, ?)`, fid, in.ShareID)
 	}
 	v, _ := h.fullView(ctx, in.ShareID)
 	out := &ShareGetOutput{}
@@ -713,12 +838,29 @@ func (h *Handler) GetByAlias(ctx context.Context, in *ByAliasInput) (*ByAliasOut
 		pwd = in.Password
 	}
 	if sec.Password != nil && *sec.Password != "" {
+		// SECURITY: rate-limit before bcrypt. Without this, an
+		// attacker could brute-force the share password at the speed
+		// of HTTP requests (bcrypt cost 12 is ~250 ms but still
+		// trivially parallel across many shares / connections). We
+		// reuse the login-throttle config so the admin tunes one
+		// knob; lockout is per-shareID (see Handler.pwThrottle docs
+		// for the DoS trade-off).
+		maxAttempts, blockSeconds := h.pwThrottleConfig(ctx)
+		throttle := h.pwThrottleHandle()
+		if blocked := throttle.blockedFor(shareID, maxAttempts, time.Duration(blockSeconds)*time.Second); blocked > 0 {
+			return nil, apperr.Unauthorized(
+				"too many failed password attempts; try again in " + blocked.Round(time.Second).String())
+		}
 		if pwd == "" {
 			return nil, apperr.Unauthorized("Password required")
 		}
 		if !auth.VerifyPassword(pwd, *sec.Password) {
+			throttle.recordFailure(shareID)
 			return nil, apperr.Unauthorized("Invalid password")
 		}
+		// Success: wipe the counter so legitimate readers don't
+		// inherit the attacker's failures.
+		throttle.reset(shareID)
 	}
 
 	// max-views gate
@@ -797,6 +939,40 @@ func (h *Handler) assertOwner(ctx context.Context, shareID, userID string) error
 	}
 	if owner != userID {
 		return apperr.Forbidden("not your share")
+	}
+	return nil
+}
+
+// dbExecutor is the subset of sqlx.{DB,Tx} we use in the two ownership
+// helpers — lets the same code run inside a transaction during Create
+// and on the bare DB during AddItems.
+type dbExecutor interface {
+	GetContext(ctx context.Context, dest any, query string, args ...any) error
+}
+
+// assertFileOwnedBy returns a Forbidden error if the file row exists
+// but belongs to someone else; NotFound when no row matches the id.
+// Used at every spot where the caller supplies a file id from a
+// request body (share Create / AddItems).
+func assertFileOwnedBy(ctx context.Context, ex dbExecutor, fileID, userID string) error {
+	var owner string
+	if err := ex.GetContext(ctx, &owner, `SELECT userId FROM files WHERE id = ?`, fileID); err != nil {
+		return apperr.NotFound("file not found")
+	}
+	if owner != userID {
+		return apperr.Forbidden("file not owned by caller")
+	}
+	return nil
+}
+
+// assertFolderOwnedBy mirrors assertFileOwnedBy for folder ids.
+func assertFolderOwnedBy(ctx context.Context, ex dbExecutor, folderID, userID string) error {
+	var owner string
+	if err := ex.GetContext(ctx, &owner, `SELECT userId FROM folders WHERE id = ?`, folderID); err != nil {
+		return apperr.NotFound("folder not found")
+	}
+	if owner != userID {
+		return apperr.Forbidden("folder not owned by caller")
 	}
 	return nil
 }

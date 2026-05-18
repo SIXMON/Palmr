@@ -455,7 +455,7 @@
   },
   "footer": {
     "poweredBy": "Με την υποστήριξη",
-    "kyanHomepage": "Αρχική σελίδα Kyantech"
+    "sponsorHomepage": "Αρχική σελίδα Sixmon"
   },
   "forgotPassword": {
     "emailLabel": "Διεύθυνση email",
@@ -1909,7 +1909,8 @@
       "active": "Ενεργός",
       "inactive": "Ανενεργός",
       "admin": "Διαχειριστής",
-      "userr": "Χρήστης"
+      "userr": "Χρήστης",
+      "storageUsed": "Χρησιμοποιημένη αποθήκευση"
     },
     "invite": {
       "button": "Δημιουργία συνδέσμου πρόσκλησης",

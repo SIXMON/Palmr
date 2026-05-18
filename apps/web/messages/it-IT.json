@@ -451,7 +451,7 @@
   },
   "footer": {
     "poweredBy": "Sviluppato da",
-    "kyanHomepage": "Homepage di Kyantech"
+    "sponsorHomepage": "Homepage di Sixmon"
   },
   "forgotPassword": {
     "emailLabel": "Indirizzo Email",
@@ -1905,7 +1905,8 @@
       "active": "Attivo",
       "inactive": "Inattivo",
       "admin": "Amministratore",
-      "userr": "Utente"
+      "userr": "Utente",
+      "storageUsed": "Spazio utilizzato"
     },
     "invite": {
       "button": "Genera Link di Invito",

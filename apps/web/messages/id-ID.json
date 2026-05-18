@@ -455,7 +455,7 @@
   },
   "footer": {
     "poweredBy": "Ditenagai oleh",
-    "kyanHomepage": "Beranda Kyantech"
+    "sponsorHomepage": "Beranda Sixmon"
   },
   "forgotPassword": {
     "emailLabel": "Alamat Email",
@@ -1909,7 +1909,8 @@
       "active": "Aktif",
       "inactive": "Tidak Aktif",
       "admin": "Admin",
-      "userr": "Pengguna"
+      "userr": "Pengguna",
+      "storageUsed": "Penyimpanan terpakai"
     },
     "invite": {
       "button": "Buat Tautan Undangan",

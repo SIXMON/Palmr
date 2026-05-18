@@ -33,8 +33,10 @@ import (
 	dbtypes "github.com/sixmon/palmr/apps/server/internal/db"
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -764,6 +766,9 @@ func (h *Handler) RegisterFileByAlias(ctx context.Context, in *RegisterFileAlias
 	if err := h.validateUpload(ctx, rs, in.Password, in.Body.Extension, &in.Body.Size); err != nil {
 		return nil, err
 	}
+	if !belongsToReverseShare(id, in.Body.ObjectName) {
+		return nil, apperr.Forbidden("objectName does not belong to this reverse share")
+	}
 	return h.insertFile(ctx, id, in.Body.Name, in.Body.Description, in.Body.Extension, in.Body.Size,
 		in.Body.ObjectName, in.Body.UploaderEmail, in.Body.UploaderName)
 }
@@ -776,8 +781,24 @@ func (h *Handler) RegisterFileByID(ctx context.Context, in *RegisterFileIDInput)
 	if err := h.validateUpload(ctx, rs, in.Password, in.Body.Extension, &in.Body.Size); err != nil {
 		return nil, err
 	}
+	if !belongsToReverseShare(in.ID, in.Body.ObjectName) {
+		return nil, apperr.Forbidden("objectName does not belong to this reverse share")
+	}
 	return h.insertFile(ctx, in.ID, in.Body.Name, in.Body.Description, in.Body.Extension, in.Body.Size,
 		in.Body.ObjectName, in.Body.UploaderEmail, in.Body.UploaderName)
+}
+
+// belongsToReverseShare returns true when the supplied S3 object name
+// sits under `reverse-shares/<id>/`. PresignPut / MultipartCreate mint
+// keys with exactly that prefix; we enforce it on every anonymous
+// callback that takes an `objectName` so an attacker can't register a
+// file row against — or finalise a multipart upload against — an
+// arbitrary key elsewhere in the bucket.
+func belongsToReverseShare(reverseShareID, objectName string) bool {
+	if reverseShareID == "" {
+		return false
+	}
+	return strings.HasPrefix(objectName, "reverse-shares/"+reverseShareID+"/")
 }
 
 func (h *Handler) insertFile(ctx context.Context, reverseShareID, name string, desc *string, ext string, size int64, obj string, email, uploader *string) (*RSFileOutput, error) {
@@ -969,13 +990,24 @@ func (h *Handler) MultipartComplete(ctx context.Context, in *MpCompleteInput) (*
 	if h.S3 == nil {
 		return nil, apperr.Internal("S3 not configured")
 	}
+	// Resolve the alias and confirm the supplied objectName belongs to
+	// it. The alias also gates whether the reverse share accepts
+	// uploads at all (matching what MultipartCreate does on the same
+	// route).
+	id, err := h.aliasToID(ctx, in.Alias)
+	if err != nil {
+		return nil, err
+	}
+	if !belongsToReverseShare(id, in.Body.ObjectName) {
+		return nil, apperr.Forbidden("objectName does not belong to this reverse share")
+	}
 	parts := make([]s3types.CompletedPart, len(in.Body.Parts))
 	for i, p := range in.Body.Parts {
 		etag := p.etag()
 		num := p.num()
 		parts[i] = s3types.CompletedPart{ETag: &etag, PartNumber: &num}
 	}
-	_, err := h.S3.Client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+	_, err = h.S3.Client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
 		Bucket:          aws.String(h.S3.Bucket),
 		Key:             aws.String(in.Body.ObjectName),
 		UploadId:        aws.String(in.Body.UploadID),
@@ -984,9 +1016,60 @@ func (h *Handler) MultipartComplete(ctx context.Context, in *MpCompleteInput) (*
 	if err != nil {
 		return nil, apperr.Internal("complete multipart: " + err.Error())
 	}
+	// SECURITY (L4): the reverse share advertises rs.MaxFileSize and
+	// the global maxFileSize at presign time, but a multipart caller
+	// can stream past whatever they claimed. HEAD the object now and
+	// drop it if the real size violates either limit. Same delete-on-
+	// reject pattern as file.MultipartComplete — refusal alone would
+	// leave the oversized object sitting in the bucket.
+	if err := h.enforceMultipartSize(ctx, id, in.Body.ObjectName); err != nil {
+		return nil, err
+	}
 	out := &RSMsgOutput{}
 	out.Body.Message = "ok"
 	return out, nil
+}
+
+// enforceMultipartSize compares the just-completed object's true size
+// against both rs.maxFileSize (per-reverse-share) and the global
+// maxFileSize (app_configs). Oversized objects are deleted before we
+// return the error so the bucket can't accumulate junk from rejected
+// uploads.
+func (h *Handler) enforceMultipartSize(ctx context.Context, reverseShareID, objectName string) error {
+	head, err := h.S3.Client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(h.S3.Bucket),
+		Key:    aws.String(objectName),
+	})
+	if err != nil {
+		_, _ = h.S3.Client.DeleteObject(ctx, &s3.DeleteObjectInput{
+			Bucket: aws.String(h.S3.Bucket),
+			Key:    aws.String(objectName),
+		})
+		return apperr.Internal("verify upload size: " + err.Error())
+	}
+	size := aws.ToInt64(head.ContentLength)
+
+	var perShare sql.NullInt64
+	_ = h.DB.QueryRowContext(ctx,
+		`SELECT maxFileSize FROM reverse_shares WHERE id = ?`, reverseShareID).Scan(&perShare)
+	if perShare.Valid && perShare.Int64 > 0 && size > perShare.Int64 {
+		_, _ = h.S3.Client.DeleteObject(ctx, &s3.DeleteObjectInput{
+			Bucket: aws.String(h.S3.Bucket),
+			Key:    aws.String(objectName),
+		})
+		return apperr.BadRequest("uploaded file exceeds this reverse share's file size limit")
+	}
+
+	var globalRaw string
+	_ = h.DB.GetContext(ctx, &globalRaw, `SELECT value FROM app_configs WHERE key = 'maxFileSize'`)
+	if global, err := strconv.ParseInt(globalRaw, 10, 64); err == nil && global > 0 && size > global {
+		_, _ = h.S3.Client.DeleteObject(ctx, &s3.DeleteObjectInput{
+			Bucket: aws.String(h.S3.Bucket),
+			Key:    aws.String(objectName),
+		})
+		return apperr.BadRequest("uploaded file exceeds the global maxFileSize limit")
+	}
+	return nil
 }
 
 type MpAbortInput struct {
@@ -1002,7 +1085,14 @@ func (h *Handler) MultipartAbort(ctx context.Context, in *MpAbortInput) (*RSMsgO
 	if h.S3 == nil {
 		return nil, apperr.Internal("S3 not configured")
 	}
-	_, err := h.S3.Client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
+	id, err := h.aliasToID(ctx, in.Alias)
+	if err != nil {
+		return nil, err
+	}
+	if !belongsToReverseShare(id, in.Body.ObjectName) {
+		return nil, apperr.Forbidden("objectName does not belong to this reverse share")
+	}
+	_, err = h.S3.Client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
 		Bucket:   aws.String(h.S3.Bucket),
 		Key:      aws.String(in.Body.ObjectName),
 		UploadId: aws.String(in.Body.UploadID),

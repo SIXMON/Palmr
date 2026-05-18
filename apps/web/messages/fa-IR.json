@@ -455,7 +455,7 @@
   },
   "footer": {
     "poweredBy": "قدرت گرفته از",
-    "kyanHomepage": "صفحه اصلی Kyantech"
+    "sponsorHomepage": "صفحه اصلی Sixmon"
   },
   "forgotPassword": {
     "emailLabel": "آدرس ایمیل",
@@ -1909,7 +1909,8 @@
       "active": "فعال",
       "inactive": "غیرفعال",
       "admin": "مدیر",
-      "userr": "کاربر"
+      "userr": "کاربر",
+      "storageUsed": "فضای استفاده‌شده"
     },
     "invite": {
       "button": "تولید لینک دعوت",

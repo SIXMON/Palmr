@@ -17,6 +17,8 @@ import (
 	"encoding/hex"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/jmoiron/sqlx"
@@ -30,6 +32,48 @@ import (
 type Handler struct {
 	DB      *sqlx.DB
 	AppName string
+
+	// totpSeen tracks recently-used (userID, code) pairs so a code
+	// can't be replayed inside the ~30-second window where
+	// totp.Validate would still accept it. Lazy-initialised so the
+	// existing &Handler{DB:..., AppName:...} literal in main.go keeps
+	// working. Process-local — restart wipes the cache, which is
+	// fine: a stale code expires within seconds anyway.
+	seenMu   sync.Mutex
+	totpSeen map[string]time.Time
+}
+
+// totpReplayWindow is how long a successful code is blocked from
+// replay. totp.Validate's default skew is ±1 step (30s), so 90s
+// safely covers both the prior and the next step a client might
+// land on under clock drift.
+const totpReplayWindow = 90 * time.Second
+
+// rememberTOTP records that (userID, code) just succeeded so a
+// re-submit inside the replay window is rejected. The function
+// returns true if the code is fresh (caller proceeds) or false if
+// the code was already burned within the window.
+func (h *Handler) rememberTOTP(userID, code string) bool {
+	h.seenMu.Lock()
+	defer h.seenMu.Unlock()
+	if h.totpSeen == nil {
+		h.totpSeen = map[string]time.Time{}
+	}
+	// Opportunistic GC of expired entries on every call — keeps the
+	// map bounded by the rate of successful 2FA logins, not by the
+	// rate of attempts.
+	now := time.Now()
+	for k, exp := range h.totpSeen {
+		if exp.Before(now) {
+			delete(h.totpSeen, k)
+		}
+	}
+	key := userID + ":" + code
+	if exp, ok := h.totpSeen[key]; ok && exp.After(now) {
+		return false
+	}
+	h.totpSeen[key] = now.Add(totpReplayWindow)
+	return true
 }
 
 func Register(api huma.API, h *Handler) {
@@ -78,6 +122,18 @@ func (h *Handler) Setup(ctx context.Context, in *TFSetupInput) (*TFSetupOutput, 
 	uc, err := auth.EnsureAuth(ctx)
 	if err != nil {
 		return nil, apperr.Unauthorized(err.Error())
+	}
+	// SECURITY: refuse to (re)issue a new TOTP secret if 2FA is
+	// already enabled. The pre-fix flow allowed any authenticated
+	// session (including one obtained via a stolen 30-day trusted-
+	// device cookie) to call Setup, write a fresh secret, then
+	// VerifySetup with their own TOTP — quietly hijacking the
+	// account's 2FA and neutralising Disable's password-confirmation.
+	// Users who need to rotate must Disable first.
+	var enabled bool
+	_ = h.DB.QueryRowContext(ctx, `SELECT twoFactorEnabled FROM users WHERE id = ?`, uc.UserID).Scan(&enabled)
+	if enabled {
+		return nil, apperr.BadRequest("2FA is already enabled; disable it before configuring a new authenticator")
 	}
 	var email string
 	_ = h.DB.GetContext(ctx, &email, `SELECT email FROM users WHERE id = ?`, uc.UserID)
@@ -198,6 +254,17 @@ func (h *Handler) Verify(ctx context.Context, in *TFTokenInput) (*TFVerifyOutput
 		Scan(&secret, &backupCSV)
 	out := &TFVerifyOutput{}
 	if secret != "" && totp.Validate(in.Body.Token, secret) {
+		// SECURITY (L2): a TOTP code is valid for ~30 seconds and the
+		// pquerna/otp library accepts the same digits on every call
+		// during that window. Without a replay guard a shoulder-
+		// surfer or network-MITM with one code could replay it
+		// multiple times — useful in a phish-then-MITM scenario where
+		// the attacker watches the user enter a code on a fake page,
+		// then races a real login. We refuse a code we've already
+		// accepted for this user within totpReplayWindow.
+		if !h.rememberTOTP(uc.UserID, in.Body.Token) {
+			return nil, apperr.Unauthorized("TOTP code already used; wait for the next code")
+		}
 		out.Body.Success = true
 		out.Body.Method = "totp"
 		return out, nil
@@ -206,17 +273,33 @@ func (h *Handler) Verify(ctx context.Context, in *TFTokenInput) (*TFVerifyOutput
 		codes := strings.Split(backupCSV, ",")
 		token := strings.ToUpper(strings.TrimSpace(in.Body.Token))
 		for i, c := range codes {
-			if strings.EqualFold(strings.TrimSpace(c), token) {
-				// Burn the code: remove it from the stored list so it can't
-				// be reused. Matches the legacy behavior.
-				codes = append(codes[:i], codes[i+1:]...)
-				dbtypes.LogBestEffort(ctx, "twofactor.burn_backup", h.DB,
-					`UPDATE users SET twoFactorBackupCodes = ?, updatedAt = CURRENT_TIMESTAMP WHERE id = ?`,
-					strings.Join(codes, ","), uc.UserID)
-				out.Body.Success = true
-				out.Body.Method = "backup"
+			if !strings.EqualFold(strings.TrimSpace(c), token) {
+				continue
+			}
+			// SECURITY (L3): burn the code with a CAS UPDATE rather
+			// than LogBestEffort, so two concurrent Verify calls
+			// landing on the same code race the WHERE clause — only
+			// the request whose CSV matches the row's current value
+			// actually writes the row, and the loser gets 0 affected
+			// rows + the same "invalid token" response a wrong code
+			// would. Closes the window where both requests pre-fix
+			// scanned the same CSV, both saw the code, both got 2FA
+			// success, and one UPDATE silently overwrote the other.
+			next := append(append([]string{}, codes[:i]...), codes[i+1:]...)
+			res, err := h.DB.ExecContext(ctx,
+				`UPDATE users SET twoFactorBackupCodes = ?, updatedAt = CURRENT_TIMESTAMP
+				 WHERE id = ? AND COALESCE(twoFactorBackupCodes, '') = ?`,
+				strings.Join(next, ","), uc.UserID, backupCSV)
+			if err != nil {
+				return nil, apperr.Internal("burn backup: " + err.Error())
+			}
+			if n, _ := res.RowsAffected(); n != 1 {
+				// Lost the CAS — treat as if the code didn't match.
 				return out, nil
 			}
+			out.Body.Success = true
+			out.Body.Method = "backup"
+			return out, nil
 		}
 	}
 	return out, nil

@@ -451,7 +451,7 @@
   },
   "footer": {
     "poweredBy": "技术支持：",
-    "kyanHomepage": "Kyantech 主页"
+    "sponsorHomepage": "Sixmon 主页"
   },
   "forgotPassword": {
     "emailLabel": "电子邮件地址",
@@ -1905,7 +1905,8 @@
       "active": "激活",
       "inactive": "停用",
       "admin": "管理员",
-      "userr": "用户"
+      "userr": "用户",
+      "storageUsed": "已用存储"
     },
     "invite": {
       "button": "生成邀请链接",

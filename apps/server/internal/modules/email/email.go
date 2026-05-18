@@ -112,8 +112,11 @@ type EmailTestOutput struct {
 }
 
 func (h *Handler) Test(ctx context.Context, in *EmailTestInput) (*EmailTestOutput, error) {
-	if _, err := auth.EnsureAuth(ctx); err != nil {
-		return nil, apperr.Unauthorized(err.Error())
+	// SECURITY: admin-only. The pre-fix endpoint only required
+	// EnsureAuth, letting any logged-in user send a Palmr-signed mail
+	// to any address (phishing-friendly, free-tier SMTP exhaustion).
+	if _, err := auth.EnsureAdmin(ctx, h.Svc.DB); err != nil {
+		return nil, apperr.Forbidden(err.Error())
 	}
 	err := h.Svc.Send(ctx, in.Body.To, "Palmr — SMTP test", "<p>If you see this, SMTP works.</p>")
 	out := &EmailTestOutput{}

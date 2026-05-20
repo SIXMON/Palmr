@@ -59,6 +59,16 @@ interface ShareDetailsPropsExtended extends Omit<ShareDetailsProps, "onBulkDownl
   handleSearch: (query: string) => void;
 }
 
+// shellQuote wraps a string in single quotes for safe POSIX shell
+// pasting. Embedded single quotes are escaped as `'\''` (close, escape,
+// reopen). Used for the curl command surfaced by handleCopyCurl —
+// share names, passwords, and filenames can carry spaces, quotes, $,
+// etc. Declared at module scope so eslint's no-use-before-define
+// rule is happy.
+function shellQuote(s: string): string {
+  return `'${String(s).replace(/'/g, "'\\''")}'`;
+}
+
 export function ShareDetails({
   share,
   password,
@@ -235,12 +245,4 @@ export function ShareDetails({
       )}
     </>
   );
-}
-
-// shellQuote wraps a string in single quotes for safe POSIX shell
-// pasting. Embedded single quotes are escaped as `'\''` (close, escape,
-// reopen). Used for the curl command surfaced by handleCopyCurl — share
-// names, passwords, and filenames can carry spaces, quotes, $, etc.
-function shellQuote(s: string): string {
-  return `'${String(s).replace(/'/g, "'\\''")}'`;
 }

@@ -19,6 +19,16 @@ function formatLastSeen(value: string | null | undefined): string | null {
   return formatDistanceToNow(parsed, { addSuffix: true });
 }
 
+// LastActivityCell renders the relative time with the absolute
+// timestamp as a `title` tooltip — operators correlating with logs
+// can hover for the exact reference.
+function LastActivityCell({ value }: { value: string | null | undefined }) {
+  const rel = formatLastSeen(value);
+  if (!rel) return <>—</>;
+  const absolute = value ? new Date(value).toLocaleString() : undefined;
+  return <span title={absolute}>{rel}</span>;
+}
+
 export function UsersTable({ users, currentUser, onEdit, onDelete, onToggleStatus }: UsersTableProps) {
   const t = useTranslations();
   const isCurrentUser = (userId: string) => currentUser?.id === userId;
@@ -83,18 +93,7 @@ export function UsersTable({ users, currentUser, onEdit, onDelete, onToggleStatu
                 {user.storageUsed !== undefined ? formatFileSize(Number(user.storageUsed)) : "—"}
               </TableCell>
               <TableCell className="h-12 px-4 text-sm text-muted-foreground">
-                {(() => {
-                  const rel = formatLastSeen(user.lastSeenAt);
-                  if (!rel) return "—";
-                  // title="" exposes the absolute timestamp on hover for
-                  // operators who need an exact reference (e.g. when
-                  // correlating with logs).
-                  return (
-                    <span title={user.lastSeenAt ? new Date(user.lastSeenAt).toLocaleString() : undefined}>
-                      {rel}
-                    </span>
-                  );
-                })()}
+                <LastActivityCell value={user.lastSeenAt} />
               </TableCell>
               <TableCell className="h-12 px-4">
                 <UserActionsDropdown

@@ -51,13 +51,13 @@ EXPOSE 5487
 # scripts run in the official image before nginx starts.
 COPY nginx.conf /etc/nginx/templates/default.conf.template
 
-# Static site. Owned by `nginx` UID 101 (the image's pre-baked nginx
-# user) so the worker processes can read it without root.
-# `--chmod=0555` (r-x for everyone) keeps directories traversable and
-# files readable while removing write bits — nginx never writes here,
-# everything under html/ is immutable for the lifetime of the image
-# (sonar docker:S6504).
-COPY --from=builder --chown=nginx:nginx --chmod=0555 /app/web/out /usr/share/nginx/html
+# Static site. Owned by root:root + mode 0555 (r-x for everyone) —
+# nginx workers (UID 101) read via the "other" bits but can't tamper
+# with the assets since they don't own them. Following sonar docker:
+# S6504's recommended pattern: even with --chmod removing +w, giving
+# ownership to the running user lets that user `chmod +w` later, so
+# keep ownership at root and let mode bits authorise reads.
+COPY --from=builder --chown=root:root --chmod=0555 /app/web/out /usr/share/nginx/html
 
 # Healthcheck hits the dedicated /health endpoint declared in nginx.conf.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \

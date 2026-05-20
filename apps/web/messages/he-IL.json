@@ -1910,7 +1910,8 @@
       "inactive": "לא פעיל",
       "admin": "מנהל",
       "userr": "משתמש",
-      "storageUsed": "אחסון בשימוש"
+      "storageUsed": "אחסון בשימוש",
+      "lastActivity": "פעילות אחרונה"
     },
     "invite": {
       "button": "צור קישור הזמנה",

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/danielgtaylor/huma/v2/adapters/humachi"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/jmoiron/sqlx"
 
 	"github.com/sixmon/palmr/apps/server/internal/auth"
 	"github.com/sixmon/palmr/apps/server/internal/config"
@@ -257,12 +259,55 @@ func authOptional(mw *auth.Middleware) func(http.Handler) http.Handler {
 							Active:  true,
 							JTI:     claims.JTI,
 						}))
+						// Bump the user's last-seen timestamp. Surfaced in
+						// the admin user-management table; debounced
+						// (lastSeenDebounce, in-memory) so a chatty SPA
+						// doesn't write every API call.
+						bumpLastSeen(r.Context(), mw.DB, claims.UserID)
 					}
 				}
 			}
 			next.ServeHTTP(w, req)
 		})
 	}
+}
+
+// lastSeenCache holds the in-memory "we already bumped this user's
+// lastSeenAt recently" map. Process-local; on restart we'll do one
+// fresh write per active user, which is fine.
+//
+// Value is the unix-millis timestamp of the last write — we store
+// millis rather than time.Time to keep the sync.Map values
+// pointer-free (avoids the heap allocation on each store).
+var lastSeenCache sync.Map
+
+// lastSeenDebounce is the minimum interval between two writes to a
+// given user's lastSeenAt row. Five minutes is short enough that an
+// admin watching the user-management table sees presence in near
+// real-time, long enough that a polling SPA doesn't cause a write
+// storm on the users PK.
+const lastSeenDebounce = 5 * time.Minute
+
+// bumpLastSeen is the helper called from authOptional. The DB write
+// is fire-and-forget — failure means the next authenticated request
+// (5+ minutes later) will retry, which is good enough for a soft
+// timestamp like this. We deliberately use the request's context so
+// that a client disconnect cancels the write.
+func bumpLastSeen(ctx context.Context, db *sqlx.DB, userID string) {
+	now := time.Now().UTC()
+	nowMs := now.UnixMilli()
+	if prev, ok := lastSeenCache.Load(userID); ok {
+		if now.Sub(time.UnixMilli(prev.(int64))) < lastSeenDebounce {
+			return
+		}
+	}
+	// Set the cache BEFORE the DB write so a burst of concurrent
+	// requests after a debounce window expires only triggers one
+	// UPDATE (the others see the fresh value and bail). Worst case
+	// the UPDATE fails and we wait the next debounce window before
+	// trying again.
+	lastSeenCache.Store(userID, nowMs)
+	_, _ = db.ExecContext(ctx, `UPDATE users SET lastSeenAt = ? WHERE id = ?`, nowMs, userID)
 }
 
 func corsMiddleware(allow []string) func(http.Handler) http.Handler {

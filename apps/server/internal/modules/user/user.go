@@ -44,6 +44,15 @@ type User struct {
 	CreatedAt dbtypes.PrismaTime `db:"createdAt" json:"createdAt"`
 	UpdatedAt dbtypes.PrismaTime `db:"updatedAt" json:"updatedAt"`
 
+	// LastSeenAt is the most recent timestamp at which this user made an
+	// authenticated request (bumped by the authOptional middleware in
+	// cmd/server/main.go, debounced to roughly once every five minutes).
+	// Nullable: users created before the column shipped never get a
+	// back-fill, and a fresh account stays NULL until the first
+	// authenticated request lands. The admin user-management UI renders
+	// NULL as "—" rather than guessing.
+	LastSeenAt *dbtypes.PrismaTime `db:"lastSeenAt" json:"lastSeenAt"`
+
 	// StorageUsed is the sum of `files.size` for this user (in bytes).
 	// Only populated by the admin list endpoint (`GET /users`); other
 	// endpoints leave it as the zero value so the field is omitted
@@ -215,7 +224,7 @@ func (h *Handler) List(ctx context.Context, _ *struct{}) (*UserListOutput, error
 	if err := h.DB.SelectContext(ctx, &out.Body,
 		`SELECT
 		   id, firstName, lastName, username, email, image, isAdmin, isActive,
-		   createdAt, updatedAt,
+		   createdAt, updatedAt, lastSeenAt,
 		   (SELECT COALESCE(SUM(size), 0) FROM files WHERE files.userId = users.id) AS storageUsed
 		 FROM users ORDER BY createdAt DESC`); err != nil {
 		return nil, apperr.Internal("list users")
@@ -417,7 +426,7 @@ func (h *Handler) setActive(ctx context.Context, id string, active bool) (*GetBy
 func (h *Handler) loadUser(ctx context.Context, id string) (User, error) {
 	var u User
 	err := h.DB.GetContext(ctx, &u,
-		`SELECT id, firstName, lastName, username, email, image, isAdmin, isActive, createdAt, updatedAt
+		`SELECT id, firstName, lastName, username, email, image, isAdmin, isActive, createdAt, updatedAt, lastSeenAt
 		 FROM users WHERE id = ?`, id)
 	return u, err
 }

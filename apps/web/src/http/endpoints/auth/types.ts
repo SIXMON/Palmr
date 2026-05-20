@@ -10,6 +10,12 @@ export interface BaseUser {
   isActive: boolean;
   createdAt: string;
   updatedAt: string;
+  // ISO timestamp of the user's most recent authenticated request.
+  // NULL for accounts created before the feature shipped and for
+  // accounts that have never logged in. Optional rather than required
+  // because the login response (publicUser on the backend) deliberately
+  // omits it — only the admin /users list and /users/{id} carry it.
+  lastSeenAt?: string | null;
 }
 
 export interface User extends BaseUser {

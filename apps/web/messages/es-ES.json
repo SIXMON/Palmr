@@ -1910,7 +1910,8 @@
       "inactive": "Inactivo",
       "admin": "Administrador",
       "userr": "Usuario",
-      "storageUsed": "Almacenamiento utilizado"
+      "storageUsed": "Almacenamiento utilizado",
+      "lastActivity": "Última actividad"
     },
     "invite": {
       "button": "Generar Enlace de Invitación",

@@ -1906,7 +1906,8 @@
       "inactive": "غير مفعل",
       "admin": "مسؤول",
       "userr": "مستخدم",
-      "storageUsed": "التخزين المستخدم"
+      "storageUsed": "التخزين المستخدم",
+      "lastActivity": "آخر نشاط"
     },
     "invite": {
       "button": "إنشاء رابط دعوة",

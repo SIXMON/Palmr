@@ -1957,7 +1957,8 @@
       "inactive": "Inactive",
       "admin": "Admin",
       "userr": "User",
-      "storageUsed": "Storage Used"
+      "storageUsed": "Storage Used",
+      "lastActivity": "Last Activity"
     },
     "invite": {
       "button": "Generate Invite Link",

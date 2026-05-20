@@ -109,11 +109,12 @@ export function ShareDetails({
     const shareURL = window.location.origin + window.location.pathname.replace(/\/$/, "");
     // Multi-file shares stream a zip; single-file shares 302 to the
     // file. Pick a sensible filename for the -o flag in both cases.
-    const outName = hasMultipleFiles
-      ? `${share.name || "share"}.zip`
-      : share.files?.[0]
-        ? `${share.files[0].name}.${share.files[0].extension}`
-        : "download";
+    let outName = "download";
+    if (hasMultipleFiles) {
+      outName = `${share.name || "share"}.zip`;
+    } else if (share.files?.[0]) {
+      outName = `${share.files[0].name}.${share.files[0].extension}`;
+    }
     const pwdFlag = password ? ` -u :${shellQuote(password)}` : "";
     const cmd = `curl -L${pwdFlag} -o ${shellQuote(outName)} ${shellQuote(shareURL)}`;
     try {

@@ -1,4 +1,4 @@
-import { randomBytes } from "crypto";
+import { randomBytes } from "node:crypto";
 import { NextResponse } from "next/server";
 
 // Generates a 64-character alphanumeric key for the doc site's "JWT

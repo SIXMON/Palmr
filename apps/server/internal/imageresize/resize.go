@@ -14,11 +14,9 @@ import (
 	"bytes"
 	"errors"
 	"image"
-	_ "image/gif"  // register GIF decoder
-	"image/jpeg"
-	_ "image/jpeg" // register JPEG decoder
-	"image/png"
-	_ "image/png" // register PNG decoder
+	_ "image/gif" // register GIF decoder
+	"image/jpeg" // also registers the JPEG decoder via init()
+	"image/png"  // also registers the PNG decoder via init()
 	"io"
 
 	"golang.org/x/image/draw"

@@ -21,7 +21,7 @@ const UNIT_MULTIPLIERS: Record<Unit, number> = {
 };
 
 function bytesToHumanReadable(bytes: string): { value: string; unit: Unit } {
-  const numBytes = parseInt(bytes, 10);
+  const numBytes = Number.parseInt(bytes, 10);
 
   if (!numBytes || numBytes <= 0) {
     return { value: "0", unit: "MB" };
@@ -73,7 +73,7 @@ export function FileSizeInput({ value, onChange, disabled = false, error, placeh
   }, [value]);
 
   const handleValueChange = (newValue: string) => {
-    const sanitizedValue = newValue.replace(/[^0-9.]/g, "");
+    const sanitizedValue = newValue.replaceAll(/[^0-9.]/g, "");
 
     const parts = sanitizedValue.split(".");
     const finalValue = parts.length > 2 ? parts[0] + "." + parts.slice(1).join("") : sanitizedValue;

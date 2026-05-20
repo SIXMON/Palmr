@@ -10,6 +10,13 @@ from pathlib import Path
 import argparse
 
 
+# Names of the underlying scripts dispatched by this orchestrator.
+# Extracted to constants so they aren't repeated as string literals
+# all over the file (sonar S1192).
+CHECK_SCRIPT = "check_translations.py"
+SYNC_SCRIPT = "sync_translations.py"
+
+
 def run_command(script_name: str, args: list) -> int:
     """Execute a script with the provided arguments."""
     script_path = Path(__file__).parent / script_name
@@ -26,7 +33,7 @@ def filter_args_for_script(script_name: str, args: list) -> list:
     # Arguments that sync_translations.py accepts  
     sync_args = ['--messages-dir', '--reference', '--no-mark-untranslated', '--dry-run']
     
-    if script_name == 'check_translations.py':
+    if script_name == CHECK_SCRIPT:
         filtered = []
         skip_next = False
         for i, arg in enumerate(args):
@@ -41,7 +48,7 @@ def filter_args_for_script(script_name: str, args: list) -> list:
                     skip_next = True
         return filtered
     
-    elif script_name == 'sync_translations.py':
+    elif script_name == SYNC_SCRIPT:
         filtered = []
         skip_next = False
         for i, arg in enumerate(args):
@@ -114,13 +121,13 @@ def main():
     
     elif args.command == 'check':
         print("🔍 Checking translation status...")
-        filtered_args = filter_args_for_script('check_translations.py', remaining_args)
-        return run_command('check_translations.py', filtered_args)
+        filtered_args = filter_args_for_script(CHECK_SCRIPT, remaining_args)
+        return run_command(CHECK_SCRIPT, filtered_args)
     
     elif args.command == 'sync':
         print("🔄 Synchronizing translation keys...")
-        filtered_args = filter_args_for_script('sync_translations.py', remaining_args)
-        return run_command('sync_translations.py', filtered_args)
+        filtered_args = filter_args_for_script(SYNC_SCRIPT, remaining_args)
+        return run_command(SYNC_SCRIPT, filtered_args)
     
     elif args.command == 'all':
         print("⚡ Running complete translation workflow...")
@@ -131,8 +138,8 @@ def main():
         
         # 1. Initial check
         print("1️⃣ Checking initial status...")
-        check_args = filter_args_for_script('check_translations.py', remaining_args)
-        result = run_command('check_translations.py', check_args)
+        check_args = filter_args_for_script(CHECK_SCRIPT, remaining_args)
+        result = run_command(CHECK_SCRIPT, check_args)
         if result != 0:
             print("❌ Error in initial check")
             return result
@@ -141,8 +148,8 @@ def main():
         
         # 2. Sync
         print("2️⃣ Synchronizing missing keys...")
-        sync_args = filter_args_for_script('sync_translations.py', remaining_args)
-        result = run_command('sync_translations.py', sync_args)
+        sync_args = filter_args_for_script(SYNC_SCRIPT, remaining_args)
+        result = run_command(SYNC_SCRIPT, sync_args)
         if result != 0:
             print("❌ Error in synchronization")
             return result
@@ -151,8 +158,8 @@ def main():
         
         # 3. Final check
         print("3️⃣ Final check...")
-        check_args = filter_args_for_script('check_translations.py', remaining_args)
-        result = run_command('check_translations.py', check_args)
+        check_args = filter_args_for_script(CHECK_SCRIPT, remaining_args)
+        result = run_command(CHECK_SCRIPT, check_args)
         if result != 0:
             print("❌ Error in final check")
             return result

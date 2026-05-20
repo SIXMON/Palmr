@@ -246,7 +246,7 @@ export function FileSelector({
 
   const FolderCard = ({ folder, isInShare }: { folder: any; isInShare: boolean }) => {
     const formatFileSize = (bytes: string | number) => {
-      const numBytes = typeof bytes === "string" ? parseInt(bytes) : bytes;
+      const numBytes = typeof bytes === "string" ? Number.parseInt(bytes) : bytes;
       if (numBytes === 0) return "0 B";
       const k = 1024;
       const sizes = ["B", "KB", "MB", "GB"];

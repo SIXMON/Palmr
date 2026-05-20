@@ -83,7 +83,7 @@ export function useAuthProviders() {
     try {
       setSaving("new");
       const response = await createProvider({
-        name: newProvider.name.toLowerCase().replace(/\s+/g, "-"),
+        name: newProvider.name.toLowerCase().replaceAll(/\s+/g, "-"),
         displayName: newProvider.displayName,
         type: newProvider.type,
         icon: newProvider.icon,
@@ -122,7 +122,7 @@ export function useAuthProviders() {
       setSaving(editingProvider.id);
       const response = await updateProviderEndpoint(editingProvider.id, {
         ...providerData,
-        name: providerData.name?.toLowerCase().replace(/\s+/g, "-"),
+        name: providerData.name?.toLowerCase().replaceAll(/\s+/g, "-"),
       });
 
       const data = response.data;

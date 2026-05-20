@@ -40,6 +40,15 @@ import (
 	"github.com/sixmon/palmr/apps/server/internal/storage"
 )
 
+// Shared error literals (S1192). Several handlers in this package
+// return the same Internal/NotFound message — extracting the strings
+// keeps them consistent and silences the sonar duplicate-literal
+// rule.
+const (
+	errS3NotConfigured = "S3 not configured"
+	errFileNotFound    = "file not found"
+)
+
 type File struct {
 	ID                 string             `db:"id"          json:"id"`
 	Name               string             `db:"name"        json:"name"`
@@ -103,7 +112,7 @@ func (h *Handler) PresignPut(ctx context.Context, in *FilePresignPutInput) (*Fil
 		return nil, apperr.Unauthorized(err.Error())
 	}
 	if h.S3 == nil {
-		return nil, apperr.Internal("S3 not configured")
+		return nil, apperr.Internal(errS3NotConfigured)
 	}
 	obj := genObjectName(uc.UserID, in.Filename, in.Extension)
 	url, err := h.S3.PresignPut(ctx, obj)
@@ -227,7 +236,7 @@ type FileDownloadOutput struct {
 
 func (h *Handler) PresignGet(ctx context.Context, in *FileDownloadInput) (*FileDownloadOutput, error) {
 	if h.S3 == nil {
-		return nil, apperr.Internal("S3 not configured")
+		return nil, apperr.Internal(errS3NotConfigured)
 	}
 	// Find the file by objectName.
 	var f File
@@ -235,7 +244,7 @@ func (h *Handler) PresignGet(ctx context.Context, in *FileDownloadInput) (*FileD
 		`SELECT id, name, description, extension, size, objectName, userId, folderId, createdAt, updatedAt
 		 FROM files WHERE objectName = ?`, in.ObjectName)
 	if err != nil {
-		return nil, apperr.NotFound("file not found")
+		return nil, apperr.NotFound(errFileNotFound)
 	}
 
 	// Access rules:
@@ -403,7 +412,7 @@ func (h *Handler) Delete(ctx context.Context, in *FileDeleteInput) (*FileMsgOutp
 	}
 	f, err := h.load(ctx, in.ID)
 	if err != nil {
-		return nil, apperr.NotFound("file not found")
+		return nil, apperr.NotFound(errFileNotFound)
 	}
 	if f.UserID != uc.UserID {
 		return nil, apperr.Forbidden("not your file")
@@ -474,7 +483,7 @@ func (h *Handler) MultipartCreate(ctx context.Context, in *MultipartCreateInput)
 		return nil, apperr.Unauthorized(err.Error())
 	}
 	if h.S3 == nil {
-		return nil, apperr.Internal("S3 not configured")
+		return nil, apperr.Internal(errS3NotConfigured)
 	}
 	obj := genObjectName(uc.UserID, in.Body.Filename, in.Body.Extension)
 	resp, err := h.S3.Client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
@@ -511,7 +520,7 @@ func (h *Handler) MultipartPartURL(ctx context.Context, in *MultipartPartInput) 
 		return nil, apperr.BadRequest("invalid objectName")
 	}
 	if h.S3 == nil {
-		return nil, apperr.Internal("S3 not configured")
+		return nil, apperr.Internal(errS3NotConfigured)
 	}
 	req, err := h.S3.PubPresigner.PresignUploadPart(ctx, &s3.UploadPartInput{
 		Bucket:     aws.String(h.S3.Bucket),
@@ -578,7 +587,7 @@ func (h *Handler) MultipartComplete(ctx context.Context, in *MultipartCompleteIn
 		return nil, apperr.Unauthorized(err.Error())
 	}
 	if h.S3 == nil {
-		return nil, apperr.Internal("S3 not configured")
+		return nil, apperr.Internal(errS3NotConfigured)
 	}
 	// SECURITY: the caller can hand us any `objectName` string. We
 	// must validate it sits under the caller's owned prefix; the
@@ -689,7 +698,7 @@ func (h *Handler) MultipartAbort(ctx context.Context, in *MultipartAbortInput) (
 		return nil, apperr.Unauthorized(err.Error())
 	}
 	if h.S3 == nil {
-		return nil, apperr.Internal("S3 not configured")
+		return nil, apperr.Internal(errS3NotConfigured)
 	}
 	if !ownsObject(uc.UserID, in.Body.ObjectName) {
 		return nil, apperr.Forbidden("objectName not owned by caller")
@@ -730,7 +739,7 @@ func (h *Handler) load(ctx context.Context, id string) (File, error) {
 func (h *Handler) assertOwner(ctx context.Context, id, userID string) error {
 	var owner string
 	if err := h.DB.GetContext(ctx, &owner, `SELECT userId FROM files WHERE id = ?`, id); err != nil {
-		return apperr.NotFound("file not found")
+		return apperr.NotFound(errFileNotFound)
 	}
 	if owner != userID {
 		return apperr.Forbidden("not your file")

@@ -98,7 +98,7 @@ function getFormDefaultValues(): EditReverseShareFormData {
 
 function parsePositiveIntegerOrNull(value?: string): number | null {
   if (!value || value === DEFAULT_VALUES.ZERO_STRING) return null;
-  const parsed = parseInt(value);
+  const parsed = Number.parseInt(value);
   return parsed > 0 ? parsed : null;
 }
 

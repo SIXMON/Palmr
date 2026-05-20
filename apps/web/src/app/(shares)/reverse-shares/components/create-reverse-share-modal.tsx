@@ -137,8 +137,8 @@ export function CreateReverseShareModal({
     }
 
     if (formData.hasFileLimits) {
-      const maxFiles = parseInt(formData.maxFiles || "0");
-      const maxFileSize = parseInt(formData.maxFileSize || "0");
+      const maxFiles = Number.parseInt(formData.maxFiles || "0");
+      const maxFileSize = Number.parseInt(formData.maxFileSize || "0");
 
       if (maxFiles > 0) {
         payload.maxFiles = maxFiles;

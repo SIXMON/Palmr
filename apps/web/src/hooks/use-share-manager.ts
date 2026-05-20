@@ -117,7 +117,10 @@ export function useShareManager(onSuccess: () => void) {
   const handleUpdateName = async (shareId: string, newName: string) => {
     try {
       await updateShare({ id: shareId, name: newName });
-      await onSuccess();
+      // onSuccess is typed `() => void` and every other call site in
+      // this file invokes it without await — keep it consistent
+      // (sonar S4123).
+      onSuccess();
       toast.success(t("shareManager.updateSuccess"));
     } catch {
       toast.error(t("shareManager.updateError"));
@@ -127,7 +130,7 @@ export function useShareManager(onSuccess: () => void) {
   const handleUpdateDescription = async (shareId: string, newDescription: string) => {
     try {
       await updateShare({ id: shareId, description: newDescription });
-      await onSuccess();
+      onSuccess();
       toast.success(t("shareManager.updateSuccess"));
     } catch {
       toast.error(t("shareManager.updateError"));

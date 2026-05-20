@@ -52,6 +52,19 @@ import (
 	"github.com/sixmon/palmr/apps/server/internal/storage"
 )
 
+// Shared error / path literals. Extracted so the strings don't drift
+// out of sync across handlers and so the sonar-flagged S1192 dupes
+// collapse to a single source of truth.
+const (
+	errReverseShareNotFound  = "reverse share not found"
+	errNotYourReverseShare   = "not your reverse-share"
+	errObjectNotInShare      = "objectName does not belong to this reverse share"
+	errS3NotConfigured       = "S3 not configured"
+	errFileNotFound          = "file not found"
+	objectPrefixReverseShare = "reverse-shares/"
+	routeReverseShares       = "/reverse-shares"
+)
+
 // ReverseShare mirrors the reverse_shares row 1:1.
 type ReverseShare struct {
 	ID                 string              `db:"id"                 json:"id"`
@@ -114,10 +127,10 @@ func Register(api huma.API, h *Handler) {
 	}
 
 	// Owner
-	huma.Register(api, op(http.MethodPost, "/reverse-shares", "createReverseShare"), h.Create)
-	huma.Register(api, op(http.MethodGet, "/reverse-shares", "listReverseShares"), h.List)
+	huma.Register(api, op(http.MethodPost, routeReverseShares, "createReverseShare"), h.Create)
+	huma.Register(api, op(http.MethodGet, routeReverseShares, "listReverseShares"), h.List)
 	huma.Register(api, op(http.MethodGet, "/reverse-shares/{id}", "getReverseShare"), h.Get)
-	huma.Register(api, op(http.MethodPut, "/reverse-shares", "updateReverseShare"), h.Update)
+	huma.Register(api, op(http.MethodPut, routeReverseShares, "updateReverseShare"), h.Update)
 	huma.Register(api, op(http.MethodDelete, "/reverse-shares/{id}", "deleteReverseShare"), h.Delete)
 	huma.Register(api, op(http.MethodPatch, "/reverse-shares/{id}/activate", "activateReverseShare"), h.Activate)
 	huma.Register(api, op(http.MethodPatch, "/reverse-shares/{id}/deactivate", "deactivateReverseShare"), h.Deactivate)
@@ -304,7 +317,7 @@ func (h *Handler) Get(ctx context.Context, in *RSGetInput) (*RSSingleOutput, err
 	}
 	rs, err := h.loadWithRel(ctx, in.ID)
 	if err != nil || rs.CreatorID != uc.UserID {
-		return nil, apperr.NotFound("reverse share not found")
+		return nil, apperr.NotFound(errReverseShareNotFound)
 	}
 	out := &RSSingleOutput{}
 	out.Body.ReverseShare = rs
@@ -590,7 +603,7 @@ func (h *Handler) publicGet(ctx context.Context, id string) (*RSPublicGetOutput,
 	var pwd *string
 	if err := row.Scan(&pv.ID, &pv.Name, &pv.Description, &pv.Expiration, &pv.MaxFiles, &pv.MaxFileSize,
 		&pv.AllowedFileTypes, &pwd, &pv.IsActive, &pv.PageLayout, &pv.NameFieldRequired, &pv.EmailFieldRequired); err != nil {
-		return nil, apperr.NotFound("reverse share not found")
+		return nil, apperr.NotFound(errReverseShareNotFound)
 	}
 	pv.HasPassword = pwd != nil && *pwd != ""
 	_ = h.DB.GetContext(ctx, &pv.CurrentFileCount, `SELECT COUNT(*) FROM reverse_share_files WHERE reverseShareId = ?`, id)
@@ -664,7 +677,7 @@ func (h *Handler) PresignByAlias(ctx context.Context, in *PresignAliasInput) (*P
 	}
 	rs, err := h.load(ctx, id)
 	if err != nil {
-		return nil, apperr.NotFound("reverse share not found")
+		return nil, apperr.NotFound(errReverseShareNotFound)
 	}
 	if err := h.validateUpload(ctx, rs, in.Password, in.Body.Extension, in.Body.Size); err != nil {
 		return nil, err
@@ -675,7 +688,7 @@ func (h *Handler) PresignByAlias(ctx context.Context, in *PresignAliasInput) (*P
 func (h *Handler) PresignByID(ctx context.Context, in *PresignIDInput) (*PresignOutput, error) {
 	rs, err := h.load(ctx, in.ID)
 	if err != nil {
-		return nil, apperr.NotFound("reverse share not found")
+		return nil, apperr.NotFound(errReverseShareNotFound)
 	}
 	if err := h.validateUpload(ctx, rs, in.Password, in.Body.Extension, in.Body.Size); err != nil {
 		return nil, err
@@ -685,11 +698,11 @@ func (h *Handler) PresignByID(ctx context.Context, in *PresignIDInput) (*Presign
 
 func (h *Handler) presign(ctx context.Context, reverseShareID, filename, ext string) (*PresignOutput, error) {
 	if h.S3 == nil {
-		return nil, apperr.Internal("S3 not configured")
+		return nil, apperr.Internal(errS3NotConfigured)
 	}
 	b := make([]byte, 8)
 	_, _ = rand.Read(b)
-	obj := "reverse-shares/" + reverseShareID + "/" + time.Now().UTC().Format("20060102150405") + "-" + hex.EncodeToString(b) + "." + ext
+	obj := objectPrefixReverseShare + reverseShareID + "/" + time.Now().UTC().Format("20060102150405") + "-" + hex.EncodeToString(b) + "." + ext
 	url, err := h.S3.PresignPut(ctx, obj)
 	if err != nil {
 		return nil, apperr.Internal("presign: " + err.Error())
@@ -761,13 +774,13 @@ func (h *Handler) RegisterFileByAlias(ctx context.Context, in *RegisterFileAlias
 	}
 	rs, err := h.load(ctx, id)
 	if err != nil {
-		return nil, apperr.NotFound("reverse share not found")
+		return nil, apperr.NotFound(errReverseShareNotFound)
 	}
 	if err := h.validateUpload(ctx, rs, in.Password, in.Body.Extension, &in.Body.Size); err != nil {
 		return nil, err
 	}
 	if !belongsToReverseShare(id, in.Body.ObjectName) {
-		return nil, apperr.Forbidden("objectName does not belong to this reverse share")
+		return nil, apperr.Forbidden(errObjectNotInShare)
 	}
 	return h.insertFile(ctx, id, in.Body.Name, in.Body.Description, in.Body.Extension, in.Body.Size,
 		in.Body.ObjectName, in.Body.UploaderEmail, in.Body.UploaderName)
@@ -776,13 +789,13 @@ func (h *Handler) RegisterFileByAlias(ctx context.Context, in *RegisterFileAlias
 func (h *Handler) RegisterFileByID(ctx context.Context, in *RegisterFileIDInput) (*RSFileOutput, error) {
 	rs, err := h.load(ctx, in.ID)
 	if err != nil {
-		return nil, apperr.NotFound("reverse share not found")
+		return nil, apperr.NotFound(errReverseShareNotFound)
 	}
 	if err := h.validateUpload(ctx, rs, in.Password, in.Body.Extension, &in.Body.Size); err != nil {
 		return nil, err
 	}
 	if !belongsToReverseShare(in.ID, in.Body.ObjectName) {
-		return nil, apperr.Forbidden("objectName does not belong to this reverse share")
+		return nil, apperr.Forbidden(errObjectNotInShare)
 	}
 	return h.insertFile(ctx, in.ID, in.Body.Name, in.Body.Description, in.Body.Extension, in.Body.Size,
 		in.Body.ObjectName, in.Body.UploaderEmail, in.Body.UploaderName)
@@ -798,7 +811,7 @@ func belongsToReverseShare(reverseShareID, objectName string) bool {
 	if reverseShareID == "" {
 		return false
 	}
-	return strings.HasPrefix(objectName, "reverse-shares/"+reverseShareID+"/")
+	return strings.HasPrefix(objectName, objectPrefixReverseShare+reverseShareID+"/")
 }
 
 func (h *Handler) insertFile(ctx context.Context, reverseShareID, name string, desc *string, ext string, size int64, obj string, email, uploader *string) (*RSFileOutput, error) {
@@ -846,7 +859,7 @@ type CheckPasswordOutput struct {
 func (h *Handler) CheckPassword(ctx context.Context, in *CheckPasswordInput) (*CheckPasswordOutput, error) {
 	rs, err := h.load(ctx, in.ID)
 	if err != nil {
-		return nil, apperr.NotFound("reverse share not found")
+		return nil, apperr.NotFound(errReverseShareNotFound)
 	}
 	out := &CheckPasswordOutput{}
 	if rs.Password == nil || *rs.Password == "" {
@@ -884,17 +897,17 @@ func (h *Handler) MultipartCreate(ctx context.Context, in *MpCreateAliasInput) (
 	}
 	rs, err := h.load(ctx, id)
 	if err != nil {
-		return nil, apperr.NotFound("reverse share not found")
+		return nil, apperr.NotFound(errReverseShareNotFound)
 	}
 	if err := h.validateUpload(ctx, rs, in.Password, in.Body.Extension, nil); err != nil {
 		return nil, err
 	}
 	if h.S3 == nil {
-		return nil, apperr.Internal("S3 not configured")
+		return nil, apperr.Internal(errS3NotConfigured)
 	}
 	b := make([]byte, 8)
 	_, _ = rand.Read(b)
-	obj := "reverse-shares/" + id + "/" + time.Now().UTC().Format("20060102150405") + "-" + hex.EncodeToString(b) + "." + in.Body.Extension
+	obj := objectPrefixReverseShare + id + "/" + time.Now().UTC().Format("20060102150405") + "-" + hex.EncodeToString(b) + "." + in.Body.Extension
 	resp, err := h.S3.Client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
 		Bucket: aws.String(h.S3.Bucket),
 		Key:    aws.String(obj),
@@ -924,13 +937,13 @@ type MpPartOutput struct {
 
 func (h *Handler) MultipartPart(ctx context.Context, in *MpPartInput) (*MpPartOutput, error) {
 	if h.S3 == nil {
-		return nil, apperr.Internal("S3 not configured")
+		return nil, apperr.Internal(errS3NotConfigured)
 	}
 	id, err := h.aliasToID(ctx, in.Alias)
 	if err != nil {
 		return nil, err
 	}
-	if !strings.HasPrefix(in.ObjectName, "reverse-shares/"+id+"/") {
+	if !strings.HasPrefix(in.ObjectName, objectPrefixReverseShare+id+"/") {
 		return nil, apperr.BadRequest("invalid objectName")
 	}
 	req, err := h.S3.PubPresigner.PresignUploadPart(ctx, &s3.UploadPartInput{
@@ -988,7 +1001,7 @@ func (p RSPart) etag() string {
 
 func (h *Handler) MultipartComplete(ctx context.Context, in *MpCompleteInput) (*RSMsgOutput, error) {
 	if h.S3 == nil {
-		return nil, apperr.Internal("S3 not configured")
+		return nil, apperr.Internal(errS3NotConfigured)
 	}
 	// Resolve the alias and confirm the supplied objectName belongs to
 	// it. The alias also gates whether the reverse share accepts
@@ -999,7 +1012,7 @@ func (h *Handler) MultipartComplete(ctx context.Context, in *MpCompleteInput) (*
 		return nil, err
 	}
 	if !belongsToReverseShare(id, in.Body.ObjectName) {
-		return nil, apperr.Forbidden("objectName does not belong to this reverse share")
+		return nil, apperr.Forbidden(errObjectNotInShare)
 	}
 	parts := make([]s3types.CompletedPart, len(in.Body.Parts))
 	for i, p := range in.Body.Parts {
@@ -1083,14 +1096,14 @@ type MpAbortInput struct {
 
 func (h *Handler) MultipartAbort(ctx context.Context, in *MpAbortInput) (*RSMsgOutput, error) {
 	if h.S3 == nil {
-		return nil, apperr.Internal("S3 not configured")
+		return nil, apperr.Internal(errS3NotConfigured)
 	}
 	id, err := h.aliasToID(ctx, in.Alias)
 	if err != nil {
 		return nil, err
 	}
 	if !belongsToReverseShare(id, in.Body.ObjectName) {
-		return nil, apperr.Forbidden("objectName does not belong to this reverse share")
+		return nil, apperr.Forbidden(errObjectNotInShare)
 	}
 	_, err = h.S3.Client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
 		Bucket:   aws.String(h.S3.Bucket),
@@ -1128,13 +1141,13 @@ func (h *Handler) DownloadFile(ctx context.Context, in *RSFileInput) (*RSDownloa
 		FROM reverse_share_files f JOIN reverse_shares rs ON rs.id = f.reverseShareId
 		WHERE f.id = ?`, in.FileID).Scan(&ownerID, &obj, &name, &ext)
 	if err != nil {
-		return nil, apperr.NotFound("file not found")
+		return nil, apperr.NotFound(errFileNotFound)
 	}
 	if ownerID != uc.UserID {
-		return nil, apperr.Forbidden("not your reverse-share")
+		return nil, apperr.Forbidden(errNotYourReverseShare)
 	}
 	if h.S3 == nil {
-		return nil, apperr.Internal("S3 not configured")
+		return nil, apperr.Internal(errS3NotConfigured)
 	}
 	url, err := h.S3.PresignGet(ctx, obj, name+"."+ext)
 	if err != nil {
@@ -1157,10 +1170,10 @@ func (h *Handler) DeleteFile(ctx context.Context, in *RSFileInput) (*RSMsgOutput
 		FROM reverse_share_files f JOIN reverse_shares rs ON rs.id = f.reverseShareId
 		WHERE f.id = ?`, in.FileID).Scan(&ownerID, &obj)
 	if err != nil {
-		return nil, apperr.NotFound("file not found")
+		return nil, apperr.NotFound(errFileNotFound)
 	}
 	if ownerID != uc.UserID {
-		return nil, apperr.Forbidden("not your reverse-share")
+		return nil, apperr.Forbidden(errNotYourReverseShare)
 	}
 	if h.S3 != nil {
 		_ = h.S3.Delete(ctx, obj)
@@ -1191,10 +1204,10 @@ func (h *Handler) UpdateFile(ctx context.Context, in *UpdateFileInput) (*RSMsgOu
 		FROM reverse_share_files f JOIN reverse_shares rs ON rs.id = f.reverseShareId
 		WHERE f.id = ?`, in.FileID).Scan(&ownerID)
 	if err != nil {
-		return nil, apperr.NotFound("file not found")
+		return nil, apperr.NotFound(errFileNotFound)
 	}
 	if ownerID != uc.UserID {
-		return nil, apperr.Forbidden("not your reverse-share")
+		return nil, apperr.Forbidden(errNotYourReverseShare)
 	}
 	fields := []string{}
 	args := []any{}
@@ -1263,10 +1276,10 @@ func (h *Handler) loadWithRel(ctx context.Context, id string) (ReverseShareWithR
 func (h *Handler) assertOwner(ctx context.Context, id, userID string) error {
 	var owner string
 	if err := h.DB.GetContext(ctx, &owner, `SELECT creatorId FROM reverse_shares WHERE id = ?`, id); err != nil {
-		return apperr.NotFound("reverse share not found")
+		return apperr.NotFound(errReverseShareNotFound)
 	}
 	if owner != userID {
-		return apperr.Forbidden("not your reverse-share")
+		return apperr.Forbidden(errNotYourReverseShare)
 	}
 	return nil
 }
@@ -1359,13 +1372,13 @@ func (h *Handler) CopyFile(ctx context.Context, in *RSFileInput) (*RSCopyOutput,
 		FROM reverse_share_files f JOIN reverse_shares rs ON rs.id = f.reverseShareId
 		WHERE f.id = ?`, in.FileID).Scan(&ownerID, &srcObj, &name, &ext, &size)
 	if err != nil {
-		return nil, apperr.NotFound("file not found")
+		return nil, apperr.NotFound(errFileNotFound)
 	}
 	if ownerID != uc.UserID {
-		return nil, apperr.Forbidden("not your reverse-share")
+		return nil, apperr.Forbidden(errNotYourReverseShare)
 	}
 	if h.S3 == nil {
-		return nil, apperr.Internal("S3 not configured")
+		return nil, apperr.Internal(errS3NotConfigured)
 	}
 
 	// Server-side copy. CopySource expects "<bucket>/<key>" with URL-escaped key.

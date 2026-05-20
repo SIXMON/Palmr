@@ -119,7 +119,7 @@ export function CreateShareModal({ isOpen, onClose, onSuccess, getAllFilesAndFol
               return new Date(dateValue).toISOString();
             })()
           : undefined,
-        maxViews: formData.maxViews ? parseInt(formData.maxViews) : undefined,
+        maxViews: formData.maxViews ? Number.parseInt(formData.maxViews) : undefined,
         files: selectedFiles,
         folders: selectedFolders,
       });

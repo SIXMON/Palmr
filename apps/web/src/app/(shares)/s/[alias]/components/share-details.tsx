@@ -66,7 +66,7 @@ interface ShareDetailsPropsExtended extends Omit<ShareDetailsProps, "onBulkDownl
 // etc. Declared at module scope so eslint's no-use-before-define
 // rule is happy.
 function shellQuote(s: string): string {
-  return `'${String(s).replace(/'/g, "'\\''")}'`;
+  return `'${String(s).replaceAll(/'/g, "'\\''")}'`;
 }
 
 export function ShareDetails({

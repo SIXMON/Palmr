@@ -48,6 +48,12 @@ import (
 	"github.com/sixmon/palmr/apps/server/internal/storage"
 )
 
+// Opaque error body for handler paths that don't return a typed
+// huma response. Three call-sites in ServeDownload feed this to
+// http.Error after slog'ing the real reason — collapsing the literal
+// silences sonar S1192 and prevents the strings from drifting.
+const errInternalMsg = "internal error"
+
 type Share struct {
 	ID          string     `db:"id"          json:"id"`
 	Name        *string    `db:"name"        json:"name"`
@@ -1013,12 +1019,38 @@ func assertFolderOwnedBy(ctx context.Context, ex dbExecutor, folderID, userID st
 //
 // `withRecipients` toggles the recipients fan-out — true for the owner
 // view, false for public alias views (which already exclude recipients).
+//
+// Each relation has its own helper so this orchestrator stays simple
+// (sonar S3776) — the per-step error handling and row-scan logic
+// lives in fanInShare{Files,Folders,Aliases,Recipients}.
 func (h *Handler) fullViewMany(ctx context.Context, ids []string, withRecipients bool) ([]publicView, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
+	views, err := h.loadSharesAndSecurity(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	h.fanInShareFiles(ctx, ids, views)
+	h.fanInShareFolders(ctx, ids, views)
+	h.fanInShareAliases(ctx, ids, views)
+	if withRecipients {
+		h.fanInShareRecipients(ctx, ids, views)
+	}
+	// Preserve the requested order — caller already sorted by createdAt.
+	out := make([]publicView, 0, len(ids))
+	for _, id := range ids {
+		if v, ok := views[id]; ok {
+			out = append(out, *v)
+		}
+	}
+	return out, nil
+}
 
-	// 1) Shares + security in one go (JOIN on share_security.id).
+// loadSharesAndSecurity is step 1 of fullViewMany: pull the shares
+// JOINed against their security row, returning a map keyed by id so
+// the fan-in helpers can attach rows without an extra SELECT.
+func (h *Handler) loadSharesAndSecurity(ctx context.Context, ids []string) (map[string]*publicView, error) {
 	q, args, err := sqlx.In(`
 		SELECT s.id, s.name, s.description, s.expiration, s.views, s.createdAt, s.updatedAt, s.creatorId,
 		       sec.password, sec.maxViews
@@ -1060,107 +1092,113 @@ func (h *Handler) fullViewMany(ctx context.Context, ids []string, withRecipients
 			Recipients: []recipientView{},
 		}
 	}
+	return views, nil
+}
 
-	// 2) Files via M2M, in one query.
-	if q, args, err := sqlx.In(`
+func (h *Handler) fanInShareFiles(ctx context.Context, ids []string, views map[string]*publicView) {
+	q, args, err := sqlx.In(`
 		SELECT sf.B, f.id, f.name, f.description, f.extension, f.size, f.objectName, f.userId, f.folderId, f.createdAt, f.updatedAt
-		FROM _ShareFiles sf JOIN files f ON sf.A = f.id WHERE sf.B IN (?)`, ids); err == nil {
-		rf, _ := h.DB.QueryxContext(ctx, h.DB.Rebind(q), args...)
-		if rf != nil {
-			for rf.Next() {
-				var shareID string
-				var fs FileSummary
-				var created, updated dbtypes.PrismaTime
-				if err := rf.Scan(&shareID, &fs.ID, &fs.Name, &fs.Description, &fs.Extension, &fs.Size,
-					&fs.ObjectName, &fs.UserID, &fs.FolderID, &created, &updated); err != nil {
-					continue
-				}
-				fs.CreatedAt = created.Time.Format(time.RFC3339)
-				fs.UpdatedAt = updated.Time.Format(time.RFC3339)
-				if v, ok := views[shareID]; ok {
-					v.Files = append(v.Files, fs)
-				}
-			}
-			rf.Close()
+		FROM _ShareFiles sf JOIN files f ON sf.A = f.id WHERE sf.B IN (?)`, ids)
+	if err != nil {
+		return
+	}
+	rows, err := h.DB.QueryxContext(ctx, h.DB.Rebind(q), args...)
+	if err != nil || rows == nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var shareID string
+		var fs FileSummary
+		var created, updated dbtypes.PrismaTime
+		if err := rows.Scan(&shareID, &fs.ID, &fs.Name, &fs.Description, &fs.Extension, &fs.Size,
+			&fs.ObjectName, &fs.UserID, &fs.FolderID, &created, &updated); err != nil {
+			continue
+		}
+		fs.CreatedAt = created.Time.Format(time.RFC3339)
+		fs.UpdatedAt = updated.Time.Format(time.RFC3339)
+		if v, ok := views[shareID]; ok {
+			v.Files = append(v.Files, fs)
 		}
 	}
+}
 
-	// 3) Folders via M2M, in one query.
-	if q, args, err := sqlx.In(`
+func (h *Handler) fanInShareFolders(ctx context.Context, ids []string, views map[string]*publicView) {
+	q, args, err := sqlx.In(`
 		SELECT sf.B, f.id, f.name, f.description, f.parentId, f.createdAt, f.updatedAt
-		FROM _ShareFolders sf JOIN folders f ON sf.A = f.id WHERE sf.B IN (?)`, ids); err == nil {
-		rg, _ := h.DB.QueryxContext(ctx, h.DB.Rebind(q), args...)
-		if rg != nil {
-			for rg.Next() {
-				var shareID string
-				var fs FolderSummary
-				var created, updated dbtypes.PrismaTime
-				if err := rg.Scan(&shareID, &fs.ID, &fs.Name, &fs.Description, &fs.ParentID, &created, &updated); err != nil {
-					continue
-				}
-				fs.CreatedAt = created.Time.Format(time.RFC3339)
-				fs.UpdatedAt = updated.Time.Format(time.RFC3339)
-				if v, ok := views[shareID]; ok {
-					v.Folders = append(v.Folders, fs)
-				}
-			}
-			rg.Close()
+		FROM _ShareFolders sf JOIN folders f ON sf.A = f.id WHERE sf.B IN (?)`, ids)
+	if err != nil {
+		return
+	}
+	rows, err := h.DB.QueryxContext(ctx, h.DB.Rebind(q), args...)
+	if err != nil || rows == nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var shareID string
+		var fs FolderSummary
+		var created, updated dbtypes.PrismaTime
+		if err := rows.Scan(&shareID, &fs.ID, &fs.Name, &fs.Description, &fs.ParentID, &created, &updated); err != nil {
+			continue
+		}
+		fs.CreatedAt = created.Time.Format(time.RFC3339)
+		fs.UpdatedAt = updated.Time.Format(time.RFC3339)
+		if v, ok := views[shareID]; ok {
+			v.Folders = append(v.Folders, fs)
 		}
 	}
+}
 
-	// 4) Aliases.
-	if q, args, err := sqlx.In(`
-		SELECT id, alias, shareId, createdAt, updatedAt FROM share_aliases WHERE shareId IN (?)`, ids); err == nil {
-		ra, _ := h.DB.QueryxContext(ctx, h.DB.Rebind(q), args...)
-		if ra != nil {
-			for ra.Next() {
-				var av aliasView
-				var created, updated dbtypes.PrismaTime
-				if err := ra.Scan(&av.ID, &av.Alias, &av.ShareID, &created, &updated); err != nil {
-					continue
-				}
-				av.CreatedAt = created.Time.Format(time.RFC3339)
-				av.UpdatedAt = updated.Time.Format(time.RFC3339)
-				if v, ok := views[av.ShareID]; ok {
-					v.Alias = &av
-				}
-			}
-			ra.Close()
+func (h *Handler) fanInShareAliases(ctx context.Context, ids []string, views map[string]*publicView) {
+	q, args, err := sqlx.In(`
+		SELECT id, alias, shareId, createdAt, updatedAt FROM share_aliases WHERE shareId IN (?)`, ids)
+	if err != nil {
+		return
+	}
+	rows, err := h.DB.QueryxContext(ctx, h.DB.Rebind(q), args...)
+	if err != nil || rows == nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var av aliasView
+		var created, updated dbtypes.PrismaTime
+		if err := rows.Scan(&av.ID, &av.Alias, &av.ShareID, &created, &updated); err != nil {
+			continue
+		}
+		av.CreatedAt = created.Time.Format(time.RFC3339)
+		av.UpdatedAt = updated.Time.Format(time.RFC3339)
+		if v, ok := views[av.ShareID]; ok {
+			v.Alias = &av
 		}
 	}
+}
 
-	// 5) Recipients (only when the caller wants the owner view).
-	if withRecipients {
-		if q, args, err := sqlx.In(`
-			SELECT shareId, id, email, createdAt, updatedAt FROM share_recipients WHERE shareId IN (?)`, ids); err == nil {
-			rr, _ := h.DB.QueryxContext(ctx, h.DB.Rebind(q), args...)
-			if rr != nil {
-				for rr.Next() {
-					var shareID string
-					var r recipientView
-					var created, updated dbtypes.PrismaTime
-					if err := rr.Scan(&shareID, &r.ID, &r.Email, &created, &updated); err != nil {
-						continue
-					}
-					r.CreatedAt = created.Time.Format(time.RFC3339)
-					r.UpdatedAt = updated.Time.Format(time.RFC3339)
-					if v, ok := views[shareID]; ok {
-						v.Recipients = append(v.Recipients, r)
-					}
-				}
-				rr.Close()
-			}
+func (h *Handler) fanInShareRecipients(ctx context.Context, ids []string, views map[string]*publicView) {
+	q, args, err := sqlx.In(`
+		SELECT shareId, id, email, createdAt, updatedAt FROM share_recipients WHERE shareId IN (?)`, ids)
+	if err != nil {
+		return
+	}
+	rows, err := h.DB.QueryxContext(ctx, h.DB.Rebind(q), args...)
+	if err != nil || rows == nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var shareID string
+		var r recipientView
+		var created, updated dbtypes.PrismaTime
+		if err := rows.Scan(&shareID, &r.ID, &r.Email, &created, &updated); err != nil {
+			continue
+		}
+		r.CreatedAt = created.Time.Format(time.RFC3339)
+		r.UpdatedAt = updated.Time.Format(time.RFC3339)
+		if v, ok := views[shareID]; ok {
+			v.Recipients = append(v.Recipients, r)
 		}
 	}
-
-	// Preserve the requested order — caller already sorted by createdAt.
-	out := make([]publicView, 0, len(ids))
-	for _, id := range ids {
-		if v, ok := views[id]; ok {
-			out = append(out, *v)
-		}
-	}
-	return out, nil
 }
 
 // fullView returns the owner view (with creatorId, recipients, objectName).
@@ -1407,7 +1445,7 @@ func (h *Handler) ServeDownload(w http.ResponseWriter, r *http.Request) {
 		shareID, maxArg, maxArg)
 	if dbErr != nil {
 		slog.Error("share download: bump views", "share", shareID, "err", dbErr)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		http.Error(w, errInternalMsg, http.StatusInternalServerError)
 		return
 	}
 	if n, _ := res.RowsAffected(); n != 1 {
@@ -1418,7 +1456,7 @@ func (h *Handler) ServeDownload(w http.ResponseWriter, r *http.Request) {
 	files, folders, err := h.loadShareContent(r.Context(), shareID)
 	if err != nil {
 		slog.Error("share download: load content", "share", shareID, "err", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		http.Error(w, errInternalMsg, http.StatusInternalServerError)
 		return
 	}
 	if len(files) == 0 && len(folders) == 0 {
@@ -1439,7 +1477,7 @@ func (h *Handler) ServeDownload(w http.ResponseWriter, r *http.Request) {
 		presignedURL, err := h.S3.PresignGet(r.Context(), f.ObjectName, safeZipName(f.Name+"."+f.Extension))
 		if err != nil {
 			slog.Error("share download: presign", "share", shareID, "err", err)
-			http.Error(w, "internal error", http.StatusInternalServerError)
+			http.Error(w, errInternalMsg, http.StatusInternalServerError)
 			return
 		}
 		// http.Redirect already skips the body for HEAD requests

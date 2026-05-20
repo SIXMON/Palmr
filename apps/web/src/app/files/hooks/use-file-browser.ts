@@ -13,9 +13,9 @@ const createSlug = (name: string): string => {
   return name
     .toLowerCase()
     .trim()
-    .replace(/[^\w\s-]/g, "")
-    .replace(/[\s_-]+/g, "-")
-    .replace(/^-+|-+$/g, "");
+    .replaceAll(/[^\w\s-]/g, "")
+    .replaceAll(/[\s_-]+/g, "-")
+    .replaceAll(/^-+|-+$/g, "");
 };
 
 const createFolderPathSlug = (allFolders: any[], folderId: string): string => {

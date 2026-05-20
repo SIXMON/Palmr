@@ -23,7 +23,7 @@ export function useReverseShareDetails() {
 
   const formatFileSize = (size: string | number | null) => {
     if (!size) return t("reverseShares.labels.noLimit");
-    const sizeInBytes = typeof size === "string" ? parseInt(size) : size;
+    const sizeInBytes = typeof size === "string" ? Number.parseInt(size) : size;
     if (sizeInBytes === 0) return "0 B";
     const units = ["B", "KB", "MB", "GB"];
     const k = 1024;

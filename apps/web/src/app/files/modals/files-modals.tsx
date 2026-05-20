@@ -87,7 +87,7 @@ export function FilesModals({
           ...(fileManager.foldersToDownload?.map((folder) => ({
             id: folder.id,
             name: folder.name,
-            size: folder.totalSize ? parseInt(folder.totalSize) : undefined,
+            size: folder.totalSize ? Number.parseInt(folder.totalSize) : undefined,
             type: "folder" as const,
           })) || []),
         ]}

@@ -224,7 +224,7 @@ export function FileTree({
       id: file.id,
       name: file.name,
       type: "file" as const,
-      size: parseInt(file.size),
+      size: Number.parseInt(file.size),
       parentId: file.folderId,
     }));
 

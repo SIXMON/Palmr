@@ -32,6 +32,10 @@ import (
 	apperr "github.com/sixmon/palmr/apps/server/internal/errors"
 )
 
+// Shared error literal (S1192) — four handlers in this package return
+// the same NotFound message.
+const errUserNotFound = "user not found"
+
 type User struct {
 	ID        string             `db:"id"        json:"id"`
 	FirstName string             `db:"firstName" json:"firstName"`
@@ -253,7 +257,7 @@ func (h *Handler) GetByID(ctx context.Context, in *GetByIDInput) (*GetByIDOutput
 	u, err := h.loadUser(ctx, in.ID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, apperr.NotFound("user not found")
+			return nil, apperr.NotFound(errUserNotFound)
 		}
 		return nil, apperr.Internal("load user")
 	}
@@ -362,7 +366,7 @@ func (h *Handler) UpdateSelf(ctx context.Context, in *UserUpdateInput) (*UserUpd
 	}
 	u, err := h.loadUser(ctx, targetID)
 	if err != nil {
-		return nil, apperr.NotFound("user not found")
+		return nil, apperr.NotFound(errUserNotFound)
 	}
 	return &UserUpdateOutput{Body: u}, nil
 }
@@ -387,7 +391,7 @@ func (h *Handler) Delete(ctx context.Context, in *GetByIDInput) (*UserDeleteOutp
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		return nil, apperr.NotFound("user not found")
+		return nil, apperr.NotFound(errUserNotFound)
 	}
 	out := &UserDeleteOutput{}
 	out.Body.Message = "User deleted"
@@ -414,7 +418,7 @@ func (h *Handler) setActive(ctx context.Context, id string, active bool) (*GetBy
 	}
 	u, err := h.loadUser(ctx, id)
 	if err != nil {
-		return nil, apperr.NotFound("user not found")
+		return nil, apperr.NotFound(errUserNotFound)
 	}
 	return &GetByIDOutput{Body: u}, nil
 }

@@ -49,7 +49,7 @@ export function FileTypesTagsInput({
   };
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const sanitizedValue = e.target.value.replace(/\./g, "").toLowerCase();
+    const sanitizedValue = e.target.value.replaceAll(/\./g, "").toLowerCase();
     setInputValue(sanitizedValue);
   };
 

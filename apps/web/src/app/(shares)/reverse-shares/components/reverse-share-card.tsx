@@ -90,7 +90,7 @@ export function ReverseShareCard({
     return `${parseFloat((sizeInBytes / Math.pow(k, i)).toFixed(1))} ${units[i]}`;
   };
 
-  const totalSize = reverseShare.files?.reduce((acc, file) => acc + parseInt(file.size), 0) || 0;
+  const totalSize = reverseShare.files?.reduce((acc, file) => acc + Number.parseInt(file.size), 0) || 0;
 
   const startEdit = (field: string, currentValue: any) => {
     setEditingField({ field });

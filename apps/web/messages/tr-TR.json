@@ -1906,7 +1906,8 @@
       "inactive": "Devre Dışı",
       "admin": "Yönetici",
       "userr": "Kullanıcı",
-      "storageUsed": "Kullanılan depolama"
+      "storageUsed": "Kullanılan depolama",
+      "lastActivity": "Son etkinlik"
     },
     "invite": {
       "button": "Davet Bağlantısı Oluştur",

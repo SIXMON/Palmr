@@ -1910,7 +1910,8 @@
       "inactive": "Tidak Aktif",
       "admin": "Admin",
       "userr": "Pengguna",
-      "storageUsed": "Penyimpanan terpakai"
+      "storageUsed": "Penyimpanan terpakai",
+      "lastActivity": "Aktivitas terakhir"
     },
     "invite": {
       "button": "Buat Tautan Undangan",

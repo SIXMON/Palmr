@@ -1910,7 +1910,8 @@
       "inactive": "Inativo",
       "admin": "Administrador",
       "userr": "Usuário",
-      "storageUsed": "Armazenamento utilizado"
+      "storageUsed": "Armazenamento utilizado",
+      "lastActivity": "Última atividade"
     },
     "invite": {
       "button": "Gerar Link de Convite",

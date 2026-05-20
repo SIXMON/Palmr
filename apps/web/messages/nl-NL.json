@@ -1906,7 +1906,8 @@
       "inactive": "Inactief",
       "admin": "Beheerder",
       "userr": "Gebruiker",
-      "storageUsed": "Gebruikte opslag"
+      "storageUsed": "Gebruikte opslag",
+      "lastActivity": "Laatste activiteit"
     },
     "invite": {
       "button": "Genereer Uitnodigingslink",

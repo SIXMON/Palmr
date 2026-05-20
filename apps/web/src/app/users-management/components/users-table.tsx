@@ -1,3 +1,4 @@
+import { formatDistanceToNow } from "date-fns";
 import { useTranslations } from "next-intl";
 
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -6,6 +7,17 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { formatFileSize } from "@/utils/format-file-size";
 import { UsersTableProps } from "../types";
 import { UserActionsDropdown } from "./user-actions-dropdown";
+
+// formatLastSeen renders a `lastSeenAt` ISO timestamp as a friendly
+// relative phrase ("5 minutes ago", "2 days ago"). Returns null when
+// there's nothing to show so the caller can substitute an em-dash —
+// keeps the date-fns invocation out of the JSX.
+function formatLastSeen(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return formatDistanceToNow(parsed, { addSuffix: true });
+}
 
 export function UsersTable({ users, currentUser, onEdit, onDelete, onToggleStatus }: UsersTableProps) {
   const t = useTranslations();
@@ -30,6 +42,9 @@ export function UsersTable({ users, currentUser, onEdit, onDelete, onToggleStatu
             </TableHead>
             <TableHead className="h-10 text-xs font-bold text-muted-foreground bg-muted/50 px-4">
               {t("users.table.storageUsed")}
+            </TableHead>
+            <TableHead className="h-10 text-xs font-bold text-muted-foreground bg-muted/50 px-4">
+              {t("users.table.lastActivity")}
             </TableHead>
             <TableHead className="h-10 w-[70px] text-xs font-bold text-muted-foreground bg-muted/50 px-4">
               {t("users.table.actions")}
@@ -66,6 +81,20 @@ export function UsersTable({ users, currentUser, onEdit, onDelete, onToggleStatu
               </TableCell>
               <TableCell className="h-12 px-4 text-sm tabular-nums text-muted-foreground">
                 {user.storageUsed !== undefined ? formatFileSize(Number(user.storageUsed)) : "—"}
+              </TableCell>
+              <TableCell className="h-12 px-4 text-sm text-muted-foreground">
+                {(() => {
+                  const rel = formatLastSeen(user.lastSeenAt);
+                  if (!rel) return "—";
+                  // title="" exposes the absolute timestamp on hover for
+                  // operators who need an exact reference (e.g. when
+                  // correlating with logs).
+                  return (
+                    <span title={user.lastSeenAt ? new Date(user.lastSeenAt).toLocaleString() : undefined}>
+                      {rel}
+                    </span>
+                  );
+                })()}
               </TableCell>
               <TableCell className="h-12 px-4">
                 <UserActionsDropdown

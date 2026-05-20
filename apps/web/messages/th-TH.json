@@ -1910,7 +1910,8 @@
       "inactive": "ไม่ใช้งาน",
       "admin": "ผู้ดูแลระบบ",
       "userr": "ผู้ใช้",
-      "storageUsed": "พื้นที่ที่ใช้"
+      "storageUsed": "พื้นที่ที่ใช้",
+      "lastActivity": "กิจกรรมล่าสุด"
     },
     "invite": {
       "button": "สร้างลิงค์เชิญ",

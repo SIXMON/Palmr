@@ -1906,7 +1906,8 @@
       "inactive": "비활성",
       "admin": "관리자",
       "userr": "사용자",
-      "storageUsed": "사용된 저장 공간"
+      "storageUsed": "사용된 저장 공간",
+      "lastActivity": "최근 활동"
     },
     "invite": {
       "button": "초대 링크 생성",

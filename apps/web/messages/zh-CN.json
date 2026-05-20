@@ -1906,7 +1906,8 @@
       "inactive": "停用",
       "admin": "管理员",
       "userr": "用户",
-      "storageUsed": "已用存储"
+      "storageUsed": "已用存储",
+      "lastActivity": "最近活动"
     },
     "invite": {
       "button": "生成邀请链接",

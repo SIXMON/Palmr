@@ -34,7 +34,7 @@ export const RippleButton = React.forwardRef<HTMLButtonElement, RippleButtonProp
         const lastRipple = buttonRipples[buttonRipples.length - 1];
         const timeout = setTimeout(() => {
           setButtonRipples((prevRipples) => prevRipples.filter((ripple) => ripple.key !== lastRipple.key));
-        }, parseInt(duration));
+        }, Number.parseInt(duration));
         return () => clearTimeout(timeout);
       }
     }, [buttonRipples, duration]);

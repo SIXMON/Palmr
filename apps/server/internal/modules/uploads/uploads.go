@@ -60,7 +60,7 @@ func (h *Handler) loadUserRow(r *http.Request, id string) (*userRow, error) {
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(headerContentType, "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
 }
@@ -79,6 +79,12 @@ const (
 	multipartMemoryBytes = 4 << 20 // 4 MB
 	avatarPx             = 256
 	logoPx               = 512
+
+	// Shared error / header literals (S1192 dedupe).
+	headerContentType = "Content-Type"
+	errAdminOnly      = "admin only"
+	errReloadUser     = "reload user"
+	errUpdateUser     = "update user"
 )
 
 type Handler struct {
@@ -118,12 +124,12 @@ func (h *Handler) uploadOwnAvatar(w http.ResponseWriter, r *http.Request) {
 	if _, err := h.DB.ExecContext(r.Context(),
 		`UPDATE users SET image = ?, updatedAt = CURRENT_TIMESTAMP WHERE id = ?`,
 		dataURI, uc.UserID); err != nil {
-		apperr.WriteJSON(w, http.StatusInternalServerError, "update user")
+		apperr.WriteJSON(w, http.StatusInternalServerError, errUpdateUser)
 		return
 	}
 	u, err := h.loadUserRow(r, uc.UserID)
 	if err != nil {
-		apperr.WriteJSON(w, http.StatusInternalServerError, "reload user")
+		apperr.WriteJSON(w, http.StatusInternalServerError, errReloadUser)
 		return
 	}
 	writeJSON(w, http.StatusOK, u)
@@ -138,12 +144,12 @@ func (h *Handler) removeOwnAvatar(w http.ResponseWriter, r *http.Request) {
 	if _, err := h.DB.ExecContext(r.Context(),
 		`UPDATE users SET image = NULL, updatedAt = CURRENT_TIMESTAMP WHERE id = ?`,
 		uc.UserID); err != nil {
-		apperr.WriteJSON(w, http.StatusInternalServerError, "update user")
+		apperr.WriteJSON(w, http.StatusInternalServerError, errUpdateUser)
 		return
 	}
 	u, err := h.loadUserRow(r, uc.UserID)
 	if err != nil {
-		apperr.WriteJSON(w, http.StatusInternalServerError, "reload user")
+		apperr.WriteJSON(w, http.StatusInternalServerError, errReloadUser)
 		return
 	}
 	writeJSON(w, http.StatusOK, u)
@@ -152,7 +158,7 @@ func (h *Handler) removeOwnAvatar(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) adminSetUserAvatar(w http.ResponseWriter, r *http.Request) {
 	uc, ok := auth.FromContext(r.Context())
 	if !ok || !uc.IsAdmin {
-		apperr.WriteJSON(w, http.StatusForbidden, "admin only")
+		apperr.WriteJSON(w, http.StatusForbidden, errAdminOnly)
 		return
 	}
 	id := chi.URLParam(r, "id")
@@ -164,12 +170,12 @@ func (h *Handler) adminSetUserAvatar(w http.ResponseWriter, r *http.Request) {
 	if _, err := h.DB.ExecContext(r.Context(),
 		`UPDATE users SET image = ?, updatedAt = CURRENT_TIMESTAMP WHERE id = ?`,
 		dataURI, id); err != nil {
-		apperr.WriteJSON(w, http.StatusInternalServerError, "update user")
+		apperr.WriteJSON(w, http.StatusInternalServerError, errUpdateUser)
 		return
 	}
 	u, err := h.loadUserRow(r, id)
 	if err != nil {
-		apperr.WriteJSON(w, http.StatusInternalServerError, "reload user")
+		apperr.WriteJSON(w, http.StatusInternalServerError, errReloadUser)
 		return
 	}
 	writeJSON(w, http.StatusOK, u)
@@ -186,7 +192,7 @@ func (h *Handler) adminSetUserAvatar(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) uploadAppLogo(w http.ResponseWriter, r *http.Request) {
 	uc, ok := auth.FromContext(r.Context())
 	if !ok || !uc.IsAdmin {
-		apperr.WriteJSON(w, http.StatusForbidden, "admin only")
+		apperr.WriteJSON(w, http.StatusForbidden, errAdminOnly)
 		return
 	}
 	dataURI, err := h.readAndProcess(r, maxLogoBytes, logoPx, imageresize.PNG)
@@ -206,7 +212,7 @@ func (h *Handler) uploadAppLogo(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) removeAppLogo(w http.ResponseWriter, r *http.Request) {
 	uc, ok := auth.FromContext(r.Context())
 	if !ok || !uc.IsAdmin {
-		apperr.WriteJSON(w, http.StatusForbidden, "admin only")
+		apperr.WriteJSON(w, http.StatusForbidden, errAdminOnly)
 		return
 	}
 	if _, err := h.DB.ExecContext(r.Context(),
@@ -214,7 +220,7 @@ func (h *Handler) removeAppLogo(w http.ResponseWriter, r *http.Request) {
 		apperr.WriteJSON(w, http.StatusInternalServerError, "update logo")
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(headerContentType, "application/json")
 	_, _ = w.Write([]byte(`{"message":"logo removed"}`))
 }
 
@@ -230,7 +236,7 @@ func (h *Handler) removeAppLogo(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) readAndProcess(r *http.Request, maxBytes int64, dim int, enc imageresize.Encoding) (string, error) {
 	r.Body = http.MaxBytesReader(nil, r.Body, maxBytes)
 
-	ct := r.Header.Get("Content-Type")
+	ct := r.Header.Get(headerContentType)
 	switch {
 	case strings.HasPrefix(ct, "multipart/form-data"):
 		// ParseMultipartForm's argument is the in-memory buffer size, not

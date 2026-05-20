@@ -58,7 +58,7 @@ export function QrCodeModal({ isOpen, onClose, shareLink, shareName }: QrCodeMod
 
         // Create a download link
         const link = document.createElement("a");
-        link.download = `${shareName.replace(/[^a-z0-9]/gi, "-").toLowerCase()}-qr-code.png`;
+        link.download = `${shareName.replaceAll(/[^a-z0-9]/gi, "-").toLowerCase()}-qr-code.png`;
         link.href = canvas.toDataURL("image/png");
         link.click();
 

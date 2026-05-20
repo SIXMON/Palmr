@@ -104,7 +104,7 @@ export function GenerateShareLinkModal({
 
         // Create a download link
         const link = document.createElement("a");
-        link.download = `${share?.name?.replace(/[^a-z0-9]/gi, "-").toLowerCase() || "share"}-qr-code.png`;
+        link.download = `${share?.name?.replaceAll(/[^a-z0-9]/gi, "-").toLowerCase() || "share"}-qr-code.png`;
         link.href = canvas.toDataURL("image/png");
         link.click();
 

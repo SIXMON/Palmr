@@ -54,7 +54,9 @@ if (typeof document !== "undefined") {
   const styleElement = document.createElement("iconPicker.style");
   styleElement.textContent = customStyles;
   if (!document.head.querySelector("style[data-icon-picker]")) {
-    styleElement.setAttribute("data-icon-picker", "true");
+    // Use the typed `dataset` API instead of setAttribute — sonar
+    // S7761 + standard browser-API hygiene.
+    styleElement.dataset.iconPicker = "true";
     document.head.appendChild(styleElement);
   }
 }
@@ -362,7 +364,10 @@ export function IconPicker({ value, onChange, placeholder }: IconPickerProps) {
 
   const categories = useMemo(() => {
     const uniqueCategories = Array.from(new Set(allIcons.map((icon) => icon.category)));
-    return uniqueCategories.sort();
+    // Explicit locale-aware comparator avoids sonar S2871 (sort()
+    // without a compare function falls back to lexicographic UTF-16
+    // ordering, which sorts non-ASCII category names incorrectly).
+    return uniqueCategories.sort((a, b) => a.localeCompare(b));
   }, [allIcons]);
 
   return (

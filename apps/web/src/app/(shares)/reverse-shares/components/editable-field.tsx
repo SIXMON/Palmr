@@ -11,7 +11,10 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 interface EditableFieldProps {
   label: string;
   value: any;
-  onSave: (value: any) => void;
+  // Caller may run an async persist; we await so the field doesn't flip
+  // out of edit mode before the network call settles. void | Promise<…>
+  // lets sync callers stay terse too.
+  onSave: (value: any) => void | Promise<unknown>;
   type?: "text" | "select" | "datetime-local" | "number";
   placeholder?: string;
   options?: { value: string; label: string }[];
@@ -72,7 +75,7 @@ export function EditableField({
     let processedValue: any = editValue;
 
     if (type === "number") {
-      processedValue = editValue ? parseInt(editValue) : null;
+      processedValue = editValue ? Number.parseInt(editValue) : null;
     } else if (type === "datetime-local") {
       processedValue = editValue ? new Date(editValue).toISOString() : null;
     }

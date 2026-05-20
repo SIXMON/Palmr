@@ -53,7 +53,11 @@ COPY nginx.conf /etc/nginx/templates/default.conf.template
 
 # Static site. Owned by `nginx` UID 101 (the image's pre-baked nginx
 # user) so the worker processes can read it without root.
-COPY --from=builder --chown=nginx:nginx /app/web/out /usr/share/nginx/html
+# `--chmod=0555` (r-x for everyone) keeps directories traversable and
+# files readable while removing write bits — nginx never writes here,
+# everything under html/ is immutable for the lifetime of the image
+# (sonar docker:S6504).
+COPY --from=builder --chown=nginx:nginx --chmod=0555 /app/web/out /usr/share/nginx/html
 
 # Healthcheck hits the dedicated /health endpoint declared in nginx.conf.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \

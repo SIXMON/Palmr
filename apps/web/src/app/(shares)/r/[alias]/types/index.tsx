@@ -32,7 +32,11 @@ export interface FileWithProgress {
 
 export interface PasswordModalProps {
   isOpen: boolean;
-  onSubmit: (password: string) => void;
+  // Caller may run an async submit (we await it to keep the spinner
+  // visible until the network call resolves), so allow a
+  // Promise-returning implementation as well as a fire-and-forget
+  // one.
+  onSubmit: (password: string) => void | Promise<unknown>;
   onClose: () => void;
 }
 

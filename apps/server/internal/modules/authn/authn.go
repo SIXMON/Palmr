@@ -47,6 +47,13 @@ import (
 // naturally inside this package.
 func totpValidate(code, secret string) bool { return totp.Validate(code, secret) }
 
+// errInvalidCredentials is the deliberately-generic error returned by
+// every failed login path — never reveals which axis (unknown user vs.
+// wrong password vs. 2FA failure) actually broke, to prevent email
+// enumeration. Pulled out as a const so the three call sites can't
+// drift.
+const errInvalidCredentials = "invalid credentials"
+
 // Trusted-device cookie config. The cookie holds an opaque random ID; the
 // SHA-256 of that ID is stored as `deviceHash` server-side so a leaked DB
 // row alone can't be used to forge the cookie.
@@ -184,7 +191,7 @@ func (h *Handler) Login(ctx context.Context, in *LoginInput) (*LoginOutput, erro
 		// just return invalid credentials. We *do not* throttle on unknown
 		// logins because there's no user_id to bind the counter to — adding
 		// IP-based throttling would belong at the reverse proxy.
-		return nil, apperr.Unauthorized("invalid credentials")
+		return nil, apperr.Unauthorized(errInvalidCredentials)
 	}
 
 	if !u.IsActive {
@@ -205,7 +212,7 @@ func (h *Handler) Login(ctx context.Context, in *LoginInput) (*LoginOutput, erro
 		// Bump the counter (best effort; we don't block the response on a
 		// counter write failure).
 		_ = h.recordFailure(ctx, u.ID)
-		return nil, apperr.Unauthorized("invalid credentials")
+		return nil, apperr.Unauthorized(errInvalidCredentials)
 	}
 
 	if u.TwoFactorEnabled {
@@ -342,7 +349,7 @@ func (h *Handler) CompleteTwoFactorLogin(ctx context.Context, in *TwoFactorLogin
 		       COALESCE(twoFactorBackupCodes, '') AS twoFactorBackupCodes
 		FROM users WHERE id = ?`, in.Body.UserID)
 	if err != nil {
-		return nil, apperr.Unauthorized("invalid credentials")
+		return nil, apperr.Unauthorized(errInvalidCredentials)
 	}
 	if !u.IsActive || !u.TwoFactorEnabled || u.TwoFactorSecret == "" {
 		return nil, apperr.Unauthorized("two-factor not initialised for this account")

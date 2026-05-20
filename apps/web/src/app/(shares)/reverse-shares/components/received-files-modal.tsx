@@ -102,7 +102,7 @@ function useFileEdit() {
 }
 
 const formatFileSize = (sizeString: string) => {
-  const sizeInBytes = parseInt(sizeString);
+  const sizeInBytes = Number.parseInt(sizeString);
   if (sizeInBytes === 0) return "0 B";
   const units = ["B", "KB", "MB", "GB"];
   const k = 1024;
@@ -465,7 +465,7 @@ export function ReceivedFilesModal({
 
   const getTotalSize = () => {
     if (!reverseShare?.files) return "0 B";
-    const totalBytes = reverseShare.files.reduce((acc, file) => acc + parseInt(file.size), 0);
+    const totalBytes = reverseShare.files.reduce((acc, file) => acc + Number.parseInt(file.size), 0);
     return formatFileSize(totalBytes.toString());
   };
 

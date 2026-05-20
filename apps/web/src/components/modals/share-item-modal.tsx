@@ -136,7 +136,7 @@ export function ShareItemModal({ isOpen, file, folder, onClose, onSuccess }: Sha
         description: formData.description || undefined,
         password: formData.isPasswordProtected ? formData.password : undefined,
         expiration: formData.expiresAt ? new Date(formData.expiresAt).toISOString() : undefined,
-        maxViews: formData.maxViews ? parseInt(formData.maxViews) : undefined,
+        maxViews: formData.maxViews ? Number.parseInt(formData.maxViews) : undefined,
         files: filesToShare,
         folders: foldersToShare,
       });

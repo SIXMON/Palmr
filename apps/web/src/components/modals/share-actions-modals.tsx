@@ -160,7 +160,7 @@ export function ShareActionsModals({
         name: editForm.name,
         description: editForm.description,
         expiration: editForm.expiresAt ? new Date(editForm.expiresAt).toISOString() : undefined,
-        maxViews: editForm.maxViews ? parseInt(editForm.maxViews) : null,
+        maxViews: editForm.maxViews ? Number.parseInt(editForm.maxViews) : null,
       };
 
       await onEdit(shareToEdit.id, updateData);

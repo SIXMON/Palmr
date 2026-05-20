@@ -179,7 +179,7 @@ export function ShareMultipleItemsModal({ files, folders, isOpen, onClose, onSuc
         description: formData.description || undefined,
         password: formData.isPasswordProtected ? formData.password : undefined,
         expiration: formData.expiresAt ? new Date(formData.expiresAt).toISOString() : undefined,
-        maxViews: formData.maxViews ? parseInt(formData.maxViews) : undefined,
+        maxViews: formData.maxViews ? Number.parseInt(formData.maxViews) : undefined,
         files: allFilesToShare,
         folders: allFoldersToShare,
       });
@@ -270,7 +270,7 @@ export function ShareMultipleItemsModal({ files, folders, isOpen, onClose, onSuc
       id: folder.id,
       name: folder.name,
       description: folder.description,
-      size: folder.totalSize ? parseInt(folder.totalSize) : undefined,
+      size: folder.totalSize ? Number.parseInt(folder.totalSize) : undefined,
       type: "folder" as const,
       createdAt: folder.createdAt,
       updatedAt: folder.updatedAt,
@@ -279,7 +279,7 @@ export function ShareMultipleItemsModal({ files, folders, isOpen, onClose, onSuc
 
   const totalSize =
     filesList.reduce((sum, file) => sum + file.size, 0) +
-    foldersList.reduce((sum, folder) => sum + (folder.totalSize ? parseInt(folder.totalSize) : 0), 0);
+    foldersList.reduce((sum, folder) => sum + (folder.totalSize ? Number.parseInt(folder.totalSize) : 0), 0);
   const formatFileSize = (bytes: number) => {
     const sizes = ["B", "KB", "MB", "GB"];
     if (bytes === 0) return "0 B";

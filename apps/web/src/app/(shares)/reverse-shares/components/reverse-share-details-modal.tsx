@@ -223,7 +223,7 @@ export function ReverseShareDetailsModal({
                           img.onload = () => {
                             ctx.drawImage(img, padding, padding, 200, 200);
                             const link = document.createElement("a");
-                            link.download = `${reverseShare?.name?.replace(/[^a-z0-9]/gi, "-").toLowerCase() || "reverse-share"}-qr-code.png`;
+                            link.download = `${reverseShare?.name?.replaceAll(/[^a-z0-9]/gi, "-").toLowerCase() || "reverse-share"}-qr-code.png`;
                             link.href = canvas.toDataURL("image/png");
                             link.click();
                             setIsDownloading(false);

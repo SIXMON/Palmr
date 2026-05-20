@@ -147,8 +147,8 @@ export function GenerateAliasModal({
                       {...field}
                       onChange={(e) => {
                         const value = e.target.value
-                          .replace(/\s+/g, "-")
-                          .replace(/[^a-zA-Z0-9-_]/g, "")
+                          .replaceAll(/\s+/g, "-")
+                          .replaceAll(/[^a-zA-Z0-9-_]/g, "")
                           .toLowerCase();
                         field.onChange(value);
                       }}

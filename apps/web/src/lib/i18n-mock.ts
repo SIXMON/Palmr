@@ -17,7 +17,9 @@ export const useTranslation = () => {
         if (lang) {
           currentLanguage = lang;
         }
-        return Promise.resolve();
+        // No-op mock — the `async` qualifier already wraps the
+        // implicit `undefined` return into a resolved Promise, so an
+        // explicit Promise.resolve() is redundant (sonar S7746).
       },
       language: currentLanguage,
     },

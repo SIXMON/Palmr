@@ -977,12 +977,16 @@ type MpCompleteInput struct {
 // bookkeeping — even though only PartNumber + ETag get used downstream.
 // `content-length` is `any` because Uppy ships it as a number, string,
 // or null depending on the upstream Content-Length header.
+// `x-request-id` is the AWS request-ID header Uppy mirrors back per
+// part (added in recent @uppy/aws-s3 releases); we accept it purely
+// so huma's strict schema doesn't 422 the multipart complete.
 type RSPart struct {
 	PartNumber      int32  `json:"PartNumber,omitempty"`
 	ETag            string `json:"ETag,omitempty"`
 	PartNumberLower int32  `json:"partNumber,omitempty"`
 	ETagLower       string `json:"etag,omitempty"`
 	ContentLength   any    `json:"content-length,omitempty"`
+	XRequestID      string `json:"x-request-id,omitempty"`
 }
 
 func (p RSPart) num() int32 {

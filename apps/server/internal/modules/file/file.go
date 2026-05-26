@@ -546,15 +546,17 @@ func (h *Handler) MultipartPartURL(ctx context.Context, in *MultipartPartInput) 
 //
 // `content-length` is typed as `any` because Uppy serialises it as
 // either a number, a string `"0"`, or even `null` depending on whether
-// the response Content-Length header parsed. We never use the value;
-// the field is here purely so huma's strict schema doesn't reject the
-// payload.
+// the response Content-Length header parsed. `x-request-id` is the
+// AWS request-ID header Uppy now mirrors back per part (added in
+// recent @uppy/aws-s3 releases). Both fields are accepted purely so
+// huma's strict schema doesn't reject the payload; we never read them.
 type FilePart struct {
 	PartNumber      int32  `json:"PartNumber,omitempty"`
 	ETag            string `json:"ETag,omitempty"`
 	PartNumberLower int32  `json:"partNumber,omitempty"`
 	ETagLower       string `json:"etag,omitempty"`
 	ContentLength   any    `json:"content-length,omitempty"`
+	XRequestID      string `json:"x-request-id,omitempty"`
 }
 
 // num returns whichever of PartNumber / partNumber was filled by the

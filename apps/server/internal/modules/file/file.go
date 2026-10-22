@@ -551,12 +551,14 @@ func (h *Handler) MultipartPartURL(ctx context.Context, in *MultipartPartInput) 
 // recent @uppy/aws-s3 releases). Both fields are accepted purely so
 // huma's strict schema doesn't reject the payload; we never read them.
 type FilePart struct {
-	PartNumber      int32  `json:"PartNumber,omitempty"`
-	ETag            string `json:"ETag,omitempty"`
-	PartNumberLower int32  `json:"partNumber,omitempty"`
-	ETagLower       string `json:"etag,omitempty"`
-	ContentLength   any    `json:"content-length,omitempty"`
-	XRequestID      string `json:"x-request-id,omitempty"`
+	_               struct{} `additionalProperties:"true"`
+	PartNumber      int32    `json:"PartNumber,omitempty"`
+	ETag            string   `json:"ETag,omitempty"`
+	PartNumberLower int32    `json:"partNumber,omitempty"`
+	ETagLower       string   `json:"etag,omitempty"`
+	ContentLength   any      `json:"content-length,omitempty"`
+	XRequestID      string   `json:"x-request-id,omitempty"`
+	XAmzRequestID   string   `json:"x-amz-request-id,omitempty"`
 }
 
 // num returns whichever of PartNumber / partNumber was filled by the

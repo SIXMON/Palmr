@@ -981,12 +981,14 @@ type MpCompleteInput struct {
 // part (added in recent @uppy/aws-s3 releases); we accept it purely
 // so huma's strict schema doesn't 422 the multipart complete.
 type RSPart struct {
-	PartNumber      int32  `json:"PartNumber,omitempty"`
-	ETag            string `json:"ETag,omitempty"`
-	PartNumberLower int32  `json:"partNumber,omitempty"`
-	ETagLower       string `json:"etag,omitempty"`
-	ContentLength   any    `json:"content-length,omitempty"`
-	XRequestID      string `json:"x-request-id,omitempty"`
+	_               struct{} `additionalProperties:"true"`
+	PartNumber      int32    `json:"PartNumber,omitempty"`
+	ETag            string   `json:"ETag,omitempty"`
+	PartNumberLower int32    `json:"partNumber,omitempty"`
+	ETagLower       string   `json:"etag,omitempty"`
+	ContentLength   any      `json:"content-length,omitempty"`
+	XRequestID      string   `json:"x-request-id,omitempty"`
+	XAmzRequestID   string   `json:"x-amz-request-id,omitempty"`
 }
 
 func (p RSPart) num() int32 {
